@@ -55,7 +55,16 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         await ensureUserProfile(cred.user);
       }
     } catch (err) {
-      setAuthError((err as Error).message);
+      const code = (err as { code?: string })?.code || '';
+      const rawMessage = (err as Error)?.message || 'Sign-in failed.';
+      if (code === 'auth/unauthorized-domain' || rawMessage.includes('auth/unauthorized-domain')) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        setAuthError(
+          `Domain "${host}" is not authorized in Firebase Auth. Add "${host}" under Firebase Console → Authentication → Settings → Authorized domains (Project: gen-lang-client-0138811022).`
+        );
+      } else {
+        setAuthError(rawMessage);
+      }
     } finally {
       setSigningIn(false);
     }
