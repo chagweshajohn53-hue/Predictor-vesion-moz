@@ -1,8 +1,11 @@
 import crypto from 'crypto';
+import fs from 'fs';
 import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
+import { getApp, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -39,6 +42,59 @@ import type {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function loadFirebaseProjectId(): string | null {
+  try {
+    const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    if (!fs.existsSync(cfgPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { projectId?: string };
+    if (parsed.projectId && parsed.projectId !== 'remixed-project-id') {
+      return parsed.projectId;
+    }
+  } catch {
+    // ignore missing/malformed config
+  }
+  return null;
+}
+
+const firebaseProjectId = loadFirebaseProjectId();
+const adminAuth = firebaseProjectId
+  ? getAuth(getApps().length ? getApp() : initializeApp({ projectId: firebaseProjectId }))
+  : null;
+
+async function verifyBearerFirebaseToken(req: express.Request): Promise<{ uid: string; emailVerified: boolean } | null> {
+  if (!adminAuth) return null;
+  const authHeader = req.headers.authorization;
+  const match = typeof authHeader === 'string' ? authHeader.match(/^Bearer\s+(\S+)$/i) : null;
+  const token = match?.[1];
+  if (!token || token.startsWith('ffr_')) return null;
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    return {
+      uid: decoded.uid,
+      emailVerified: Boolean(decoded.email_verified),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function requireFirebaseAuth(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): Promise<void> {
+  const verified = await verifyBearerFirebaseToken(req);
+  if (!verified) {
+    res.status(401).json({ error: 'Authentication required. Please sign in to access this workspace.' });
+    return;
+  }
+  if (!verified.emailVerified) {
+    res.status(403).json({ error: 'Verified email required.' });
+    return;
+  }
+  next();
+}
 
 const ALLOWED_RELAY_HOSTS = new Set([
   'generativelanguage.googleapis.com',
@@ -103,6 +159,11 @@ async function startServer(): Promise<void> {
     next();
   });
 
+  // Lock internal app API routes behind verified Firebase Auth
+  app.use('/api/vault', requireFirebaseAuth);
+  app.use('/api/proxy', requireFirebaseAuth);
+  app.use('/api/simulations', requireFirebaseAuth);
+
   // In-App Vault Sync & Live Ping Tester
   app.post('/api/vault/sync', (req, res) => {
     const vault = req.body as UserVault;
@@ -136,6 +197,15 @@ async function startServer(): Promise<void> {
 
   // Stateless Allowlisted Relay Endpoint (/api/public/relay)
   app.post('/api/public/relay', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    const ffrMatch = typeof authHeader === 'string' ? authHeader.match(/^Bearer\s+(ffr_\S+)$/i) : null;
+    const validFfrVault = ffrMatch?.[1] ? getVaultByToken(ffrMatch[1]) : null;
+    const validFirebase = validFfrVault ? null : await verifyBearerFirebaseToken(req);
+    if (!validFfrVault && !validFirebase?.emailVerified) {
+      res.status(401).json({ error: 'Authentication required (Firebase ID token or valid ffr_* vault token).' });
+      return;
+    }
+
     const headerTarget = req.headers['x-target-url'];
     const targetUrl =
       typeof headerTarget === 'string' && headerTarget

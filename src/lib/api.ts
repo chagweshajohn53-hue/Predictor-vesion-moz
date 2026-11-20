@@ -13,11 +13,27 @@ import type {
   UserVault,
   VaultProviderId,
 } from '../types/mirofish';
+import { auth } from './firebase';
 
 async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const customHeaders = new Headers(options?.headers);
+  if (!customHeaders.has('Content-Type')) {
+    customHeaders.set('Content-Type', 'application/json');
+  }
+  if (!customHeaders.has('Authorization') && auth.currentUser) {
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      if (idToken) {
+        customHeaders.set('Authorization', `Bearer ${idToken}`);
+      }
+    } catch {
+      // ignore token retrieval error; backend will enforce 401 if required
+    }
+  }
+
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: customHeaders,
   });
   const contentType = res.headers.get('content-type') || '';
   const rawText = await res.text();

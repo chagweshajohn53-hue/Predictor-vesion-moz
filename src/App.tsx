@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LogIn, LogOut } from 'lucide-react';
+import { LogOut } from 'lucide-react';
+import { AuthGate } from './components/AuthGate';
 import { useFirebase } from './components/FirebaseProvider';
 import { HistoryRail } from './components/HistoryRail';
 import { ProxyVaultView } from './components/ProxyVaultView';
@@ -15,7 +16,6 @@ import {
   fetchProxyStatus,
   generatePersonas,
   generateReport,
-  listSavedSimulations,
   saveSimulationWorkspace,
   sendAgentChat,
   simulateRound,
@@ -144,10 +144,19 @@ export default function App() {
     [user]
   );
 
+  // Sync Vault, Proxy Status, and Simulations only when authenticated
   useEffect(() => {
-    syncVaultToServer(vault)
-      .then(() => setVaultSyncStatus('synced'))
-      .catch(() => setVaultSyncStatus('error'));
+    if (!authReady) return;
+    if (!user) {
+      setCloudVaultStatus('idle');
+      setVaultSyncStatus('idle');
+      setProxyStatus(null);
+      setSavedWorkspaces([]);
+      setWorkspace(createEmptyWorkspace());
+      setVault(loadVaultFromStorage());
+      setError(null);
+      return;
+    }
 
     fetchProxyStatus()
       .then((status) => {
@@ -158,29 +167,6 @@ export default function App() {
         }
       })
       .catch(() => setProxyStatus(null));
-
-    listSavedSimulations()
-      .then((res) => {
-        if (Array.isArray(res?.simulations) && !user) {
-          const normalized = res.simulations.map(normalizeWorkspace);
-          setSavedWorkspaces(normalized);
-          writeLocalArchive(normalized);
-        }
-      })
-      .catch(() => {
-        if (!user) {
-          setSavedWorkspaces(readLocalArchive());
-        }
-      });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync Vault and Simulations with Firebase Firestore when authenticated
-  useEffect(() => {
-    if (!authReady) return;
-    if (!user) {
-      setCloudVaultStatus('idle');
-      return;
-    }
 
     let cancelled = false;
     setCloudVaultStatus('saving');
@@ -549,6 +535,17 @@ export default function App() {
     }
   };
 
+  if (!authReady || !user) {
+    return (
+      <AuthGate
+        authReady={authReady}
+        signingIn={signingIn}
+        error={authError}
+        onSignIn={() => void signIn()}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0B0F17] text-[#F1F5F9]">
       {/* Strict 3-Zone Top Bar Contract */}
@@ -616,40 +613,28 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-3 shrink-0">
-          {user ? (
-            <div className="flex items-center gap-2.5">
-              <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 whitespace-nowrap shrink-0">
-                {user.photoURL ? (
-                  <img
-                    src={user.photoURL}
-                    alt={user.displayName || 'User'}
-                    referrerPolicy="no-referrer"
-                    className="w-6 h-6 rounded-full border border-slate-700"
-                  />
-                ) : null}
-                <span className="max-w-[140px] truncate">{user.displayName || user.email}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => void signOut()}
-                className="px-2.5 py-2 text-xs font-medium text-slate-300 border border-slate-800 bg-[#111827] hover:border-slate-600 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                title="Sign out"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Sign Out</span>
-              </button>
+          <div className="flex items-center gap-2.5">
+            <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 whitespace-nowrap shrink-0">
+              {user.photoURL ? (
+                <img
+                  src={user.photoURL}
+                  alt={user.displayName || 'User'}
+                  referrerPolicy="no-referrer"
+                  className="w-6 h-6 rounded-full border border-slate-700"
+                />
+              ) : null}
+              <span className="max-w-[140px] truncate">{user.displayName || user.email}</span>
             </div>
-          ) : (
             <button
               type="button"
-              disabled={signingIn}
-              onClick={() => void signIn()}
-              className="px-3 py-2 text-xs font-medium text-slate-200 border border-slate-700 bg-[#111827] hover:border-sky-400 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              onClick={() => void signOut()}
+              className="px-2.5 py-2 text-xs font-medium text-slate-300 border border-slate-800 bg-[#111827] hover:border-slate-600 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              title="Sign out"
             >
-              <LogIn className="w-3.5 h-3.5 text-sky-400" />
-              <span>{signingIn ? 'Signing in...' : 'Sign in'}</span>
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sign Out</span>
             </button>
-          )}
+          </div>
 
           <button
             type="button"

@@ -36,7 +36,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           setUser(nextUser);
         } catch (err) {
           setAuthError((err as Error).message);
-          setUser(nextUser);
+          setUser(null);
         }
       } else {
         setUser(null);
@@ -63,6 +63,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     setAuthError(null);
+    try {
+      localStorage.removeItem('mirofish_user_vault_v1');
+      localStorage.removeItem('mirofish_saved_workspaces_v1');
+    } catch {
+      // ignore storage errors
+    }
     try {
       await signOutFirebase();
     } catch (err) {
