@@ -56,7 +56,7 @@
         },
         "providers": {
           "type": "object",
-          "description": "Map of provider keys (gemini, groq, openrouter, cloudflare, anthropic) with 1 primary + 3 backup slots."
+          "description": "Map of provider keys (gemini, groq, grok, openrouter, cloudflare, anthropic) with 1 primary + 3 backup slots and per-slot Cloudflare Account IDs."
         },
         "chain": {
           "type": "array",

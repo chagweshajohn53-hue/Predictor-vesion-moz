@@ -83,17 +83,23 @@ function mergeVaultWithLocal(local: UserVault, cloud: UserVault | null): { merge
   if (!cloud) {
     return { merged: local, needsCloudUpload: true };
   }
-  const providerIds: VaultProviderId[] = ['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'];
+  const providerIds: VaultProviderId[] = ['gemini', 'groq', 'grok', 'openrouter', 'cloudflare', 'anthropic'];
   let needsCloudUpload = false;
-  const mergedProviders = { ...cloud.providers };
+  const mergedProviders = { ...local.providers, ...cloud.providers };
 
   for (const pid of providerIds) {
-    const cloudSlot = cloud.providers[pid];
+    const cloudSlot = cloud.providers?.[pid];
     const localSlot = local.providers[pid];
     const cloudHasKeys = Boolean(cloudSlot?.primary?.trim() || cloudSlot?.backups?.some((b) => b.trim()));
     const localHasKeys = Boolean(localSlot?.primary?.trim() || localSlot?.backups?.some((b) => b.trim()));
-    if (!cloudHasKeys && localHasKeys) {
+    if (!cloudSlot || (!cloudHasKeys && localHasKeys)) {
       mergedProviders[pid] = { ...localSlot };
+      needsCloudUpload = true;
+    } else if (pid === 'cloudflare' && !cloudSlot.backupAccountIds && localSlot.backupAccountIds?.some((a) => a.trim())) {
+      mergedProviders[pid] = {
+        ...cloudSlot,
+        backupAccountIds: [...localSlot.backupAccountIds] as [string, string, string],
+      };
       needsCloudUpload = true;
     }
   }

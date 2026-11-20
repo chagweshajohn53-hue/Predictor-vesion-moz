@@ -28,6 +28,7 @@ const ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const VALID_PROVIDERS: VaultProviderId[] = [
   'gemini',
   'groq',
+  'grok',
   'openrouter',
   'cloudflare',
   'anthropic',
@@ -147,6 +148,11 @@ function sanitizeVaultForFirestore(uid: string, vault: UserVault) {
   const cloudflare = {
     ...normSlot('cloudflare'),
     accountId: String(cfRaw?.accountId || '').slice(0, 128),
+    backupAccountIds: [
+      String(cfRaw?.backupAccountIds?.[0] || '').slice(0, 128),
+      String(cfRaw?.backupAccountIds?.[1] || '').slice(0, 128),
+      String(cfRaw?.backupAccountIds?.[2] || '').slice(0, 128),
+    ],
   };
 
   const chain: ChainModelConfig[] = (Array.isArray(vault.chain) ? vault.chain : DEFAULT_CHAIN)
@@ -167,6 +173,7 @@ function sanitizeVaultForFirestore(uid: string, vault: UserVault) {
     providers: {
       gemini: normSlot('gemini'),
       groq: normSlot('groq'),
+      grok: normSlot('grok'),
       openrouter: normSlot('openrouter'),
       cloudflare,
       anthropic: normSlot('anthropic'),
@@ -182,16 +189,23 @@ export async function loadVaultFromFirestore(uid: string): Promise<UserVault | n
     const snap = await getDoc(vaultRef);
     if (!snap.exists()) return null;
     const data = snap.data();
+    const cf = data.providers?.cloudflare;
     return {
       apiToken: String(data.apiToken || generateVaultToken()),
       providers: {
         gemini: data.providers?.gemini || { primary: '', backups: ['', '', ''] },
         groq: data.providers?.groq || { primary: '', backups: ['', '', ''] },
+        grok: data.providers?.grok || { primary: '', backups: ['', '', ''] },
         openrouter: data.providers?.openrouter || { primary: '', backups: ['', '', ''] },
-        cloudflare: data.providers?.cloudflare || {
-          primary: '',
-          backups: ['', '', ''],
-          accountId: '',
+        cloudflare: {
+          primary: String(cf?.primary || ''),
+          backups: [cf?.backups?.[0] || '', cf?.backups?.[1] || '', cf?.backups?.[2] || ''],
+          accountId: String(cf?.accountId || ''),
+          backupAccountIds: [
+            cf?.backupAccountIds?.[0] || '',
+            cf?.backupAccountIds?.[1] || '',
+            cf?.backupAccountIds?.[2] || '',
+          ],
         },
         anthropic: data.providers?.anthropic || { primary: '', backups: ['', '', ''] },
       },

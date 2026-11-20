@@ -43,6 +43,7 @@ export function HistoryRail({
     countProviderKeys(vault, 'gemini') +
     countProviderKeys(vault, 'anthropic') +
     countProviderKeys(vault, 'groq') +
+    countProviderKeys(vault, 'grok') +
     countProviderKeys(vault, 'openrouter') +
     countProviderKeys(vault, 'cloudflare');
   const enabledModels = (vault.chain || []).filter((c) => c.enabled).length;
@@ -96,6 +97,7 @@ export function HistoryRail({
               ['gemini', 'Gemini'],
               ['anthropic', 'Claude'],
               ['groq', 'Groq'],
+              ['grok', 'xAI Grok'],
               ['openrouter', 'OpenRouter'],
               ['cloudflare', 'Cloudflare'],
             ] as const

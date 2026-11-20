@@ -62,16 +62,22 @@ const PROVIDER_META: Array<{
     placeholder: 'gsk_...',
   },
   {
+    id: 'grok',
+    name: 'xAI Grok',
+    endpointNote: 'api.x.ai/v1 · Grok 4.7 Reasoning & Chat',
+    placeholder: 'xai-...',
+  },
+  {
     id: 'openrouter',
     name: 'OpenRouter',
-    endpointNote: 'openrouter.ai/api/v1 · Free Frontier Model Pool',
+    endpointNote: 'openrouter.ai/api/v1 · openrouter/free & Frontier Pool',
     placeholder: 'sk-or-v1-...',
   },
   {
     id: 'cloudflare',
     name: 'Cloudflare Workers AI',
-    endpointNote: 'api.cloudflare.com/client/v4 · Edge Llama & QwQ',
-    placeholder: 'Cloudflare API Token',
+    endpointNote: 'api.cloudflare.com/client/v4 · Per-Slot Account ID + API Token',
+    placeholder: 'Cloudflare Workers AI API Token',
   },
 ];
 
@@ -131,8 +137,8 @@ export function ProxyVaultView({
     value: string
   ) => {
     onUpdateVault((prev) => {
-      const current = prev.providers[provider];
-      const nextBackups: [string, string, string] = [...current.backups] as [string, string, string];
+      const current = prev.providers[provider] || { primary: '', backups: ['', '', ''] };
+      const nextBackups: [string, string, string] = [...(current.backups || ['', '', ''])] as [string, string, string];
       if (typeof slot === 'number') {
         nextBackups[slot] = value;
         return {
@@ -153,41 +159,118 @@ export function ProxyVaultView({
     });
   };
 
-  const handleTestProvider = async (provider: VaultProviderId) => {
+  const handleCloudflareBackupAccountChange = (slotIdx: 0 | 1 | 2, value: string) => {
+    onUpdateVault((prev) => {
+      const current = prev.providers.cloudflare || {
+        primary: '',
+        backups: ['', '', ''],
+        accountId: '',
+        backupAccountIds: ['', '', ''],
+      };
+      const nextAccs: [string, string, string] = [
+        ...(current.backupAccountIds || ['', '', '']),
+      ] as [string, string, string];
+      nextAccs[slotIdx] = value;
+      return {
+        ...prev,
+        providers: {
+          ...prev.providers,
+          cloudflare: { ...current, backupAccountIds: nextAccs },
+        },
+      };
+    });
+  };
+
+  const handleTestProvider = async (
+    provider: VaultProviderId,
+    targetSlot?: 'primary' | 0 | 1 | 2
+  ) => {
     const slot = vault.providers[provider];
-    const apiKey = slot.primary?.trim() || slot.backups.find((b) => b.trim()) || '';
+    const resultKey = targetSlot !== undefined ? `${provider}_${targetSlot}` : provider;
+
+    let apiKey = '';
+    let accountId: string | undefined;
+    let slotLabel = 'Connection';
+
+    if (targetSlot === 'primary') {
+      apiKey = slot?.primary?.trim() || '';
+      accountId = slot?.accountId?.trim();
+      slotLabel = 'Primary';
+    } else if (typeof targetSlot === 'number') {
+      apiKey = slot?.backups?.[targetSlot]?.trim() || '';
+      accountId = slot?.backupAccountIds?.[targetSlot]?.trim() || slot?.accountId?.trim();
+      slotLabel = `Backup ${targetSlot + 1}`;
+    } else if (slot?.primary?.trim()) {
+      apiKey = slot.primary.trim();
+      accountId = slot.accountId?.trim();
+      slotLabel = 'Primary';
+    } else {
+      const firstIdx = (slot?.backups || []).findIndex((b) => Boolean(b?.trim()));
+      if (firstIdx >= 0) {
+        apiKey = slot!.backups[firstIdx]!.trim();
+        accountId = slot?.backupAccountIds?.[firstIdx]?.trim() || slot?.accountId?.trim();
+        slotLabel = `Backup ${firstIdx + 1}`;
+      }
+    }
+
     if (!apiKey) {
       setTestResults((prev) => ({
         ...prev,
-        [provider]: { loading: false, ok: false, message: 'Enter a primary or backup key first.' },
+        [resultKey]: {
+          loading: false,
+          ok: false,
+          message:
+            targetSlot !== undefined
+              ? `Enter ${slotLabel} key first.`
+              : 'Enter a primary or backup key first.',
+        },
+        ...(targetSlot !== undefined ? {} : { [provider]: { loading: false, ok: false, message: 'Enter a primary or backup key first.' } }),
       }));
       return;
     }
 
-    setTestResults((prev) => ({ ...prev, [provider]: { loading: true } }));
+    if (provider === 'cloudflare' && !accountId) {
+      const msg = `Enter the Cloudflare Account ID for ${slotLabel}.`;
+      setTestResults((prev) => ({
+        ...prev,
+        [resultKey]: { loading: false, ok: false, message: msg },
+        [provider]: { loading: false, ok: false, message: msg },
+      }));
+      return;
+    }
+
+    setTestResults((prev) => ({
+      ...prev,
+      [resultKey]: { loading: true },
+      [provider]: { loading: true },
+    }));
     try {
       const res = await testVaultProvider({
         provider,
         apiKey,
-        accountId: slot.accountId,
+        accountId,
       });
+      const entry = {
+        loading: false,
+        ok: res.ok,
+        latencyMs: res.latencyMs,
+        message: `${slotLabel}: ${res.message}`,
+      };
       setTestResults((prev) => ({
         ...prev,
-        [provider]: {
-          loading: false,
-          ok: res.ok,
-          latencyMs: res.latencyMs,
-          message: res.message,
-        },
+        [resultKey]: entry,
+        [provider]: entry,
       }));
     } catch (err) {
+      const entry = {
+        loading: false,
+        ok: false,
+        message: `${slotLabel}: ${(err as Error).message}`,
+      };
       setTestResults((prev) => ({
         ...prev,
-        [provider]: {
-          loading: false,
-          ok: false,
-          message: (err as Error).message,
-        },
+        [resultKey]: entry,
+        [provider]: entry,
       }));
     }
   };
@@ -260,6 +343,7 @@ console.log(data.choices[0].message.content, data.hops);`;
         token: vault.apiToken,
         model: liveModel,
         prompt: livePrompt,
+        vault,
       });
       setLiveResult({
         text: res.choices?.[0]?.message?.content || '',
@@ -440,9 +524,10 @@ console.log(data.choices[0].message.content, data.hops);`;
           {/* Provider Vault Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {PROVIDER_META.map((meta) => {
-              const slot = vault.providers[meta.id];
+              const slot = vault.providers[meta.id] || { primary: '', backups: ['', '', ''] };
               const keyCount = countProviderKeys(vault, meta.id);
               const test = testResults[meta.id];
+              const isCloudflare = meta.id === 'cloudflare';
               return (
                 <div
                   key={meta.id}
@@ -456,12 +541,13 @@ console.log(data.choices[0].message.content, data.hops);`;
 
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="font-mono-tabular text-xs text-slate-400">
-                        {keyCount} key{keyCount === 1 ? '' : 's'}
+                        {keyCount} {isCloudflare ? 'pair' : 'key'}
+                        {keyCount === 1 ? '' : 's'}
                       </span>
                       <button
                         type="button"
                         disabled={test?.loading}
-                        onClick={() => handleTestProvider(meta.id)}
+                        onClick={() => void handleTestProvider(meta.id)}
                         className="px-3 py-1.5 rounded-md border border-slate-700 bg-[#161F30] hover:border-sky-400 text-xs font-medium text-slate-200 transition-colors flex items-center gap-1.5 whitespace-nowrap"
                       >
                         {test?.loading ? (
@@ -482,90 +568,222 @@ console.log(data.choices[0].message.content, data.hops);`;
                           : 'border-rose-500/40 bg-rose-950/30 text-rose-300'
                       }`}
                     >
-                      {test.ok
-                        ? `${test.message} · ${test.latencyMs}ms`
-                        : test.message}
+                      {test.ok ? `${test.message} · ${test.latencyMs}ms` : test.message}
                     </div>
                   )}
 
-                  {meta.id === 'cloudflare' && (
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">
-                        Cloudflare Account ID
-                      </label>
-                      <input
-                        type="text"
-                        value={slot.accountId || ''}
-                        onChange={(e) => handleProviderKeyChange('cloudflare', 'accountId', e.target.value)}
-                        placeholder="32-char Cloudflare Account ID"
-                        className="w-full rounded-md bg-[#0B0F17] border border-slate-800 px-3 py-2 text-xs font-mono-tabular text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-sky-400"
-                      />
-                    </div>
-                  )}
-
-                  {/* Primary Key */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Primary Key
-                    </label>
-                    <div className="flex items-center bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-1.5 gap-2 focus-within:border-sky-400">
-                      <input
-                        type={revealed[`${meta.id}_primary`] ? 'text' : 'password'}
-                        value={slot.primary}
-                        onChange={(e) => handleProviderKeyChange(meta.id, 'primary', e.target.value)}
-                        placeholder={meta.placeholder}
-                        className="flex-1 bg-transparent text-xs font-mono-tabular text-slate-100 placeholder:text-slate-600 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleReveal(`${meta.id}_primary`)}
-                        className="text-slate-500 hover:text-slate-200"
-                      >
-                        {revealed[`${meta.id}_primary`] ? (
-                          <EyeOff className="w-3.5 h-3.5" />
-                        ) : (
-                          <Eye className="w-3.5 h-3.5" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 3 Backup Key Slots */}
-                  <div className="space-y-2 pt-1">
-                    <div className="text-xs text-slate-400">
-                      Backup Pooling Keys (Tried sequentially on 429 / error)
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      {([0, 1, 2] as const).map((idx) => {
-                        const fieldKey = `${meta.id}_b${idx}`;
-                        return (
-                          <div
-                            key={idx}
-                            className="flex items-center bg-[#0B0F17] border border-slate-800/80 rounded-md px-2.5 py-1.5 gap-1.5 focus-within:border-sky-400"
+                  {isCloudflare ? (
+                    <div className="space-y-3">
+                      {/* Cloudflare Primary Slot: Account ID + API Token */}
+                      <div className="rounded-md border border-slate-800/90 bg-[#0B0F17]/60 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium text-slate-200">Primary Account &amp; Token</span>
+                          <button
+                            type="button"
+                            disabled={testResults['cloudflare_primary']?.loading}
+                            onClick={() => void handleTestProvider('cloudflare', 'primary')}
+                            className="px-2 py-1 rounded border border-slate-700 bg-[#161F30] hover:border-sky-400 text-[11px] font-medium text-slate-200 flex items-center gap-1"
                           >
+                            {testResults['cloudflare_primary']?.loading ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Zap className="w-3 h-3 text-sky-400" />
+                            )}
+                            Test Primary
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <input
+                            type="text"
+                            value={slot.accountId || ''}
+                            onChange={(e) => handleProviderKeyChange('cloudflare', 'accountId', e.target.value)}
+                            placeholder="Primary Account ID (32-char)"
+                            className="w-full rounded-md bg-[#0B0F17] border border-slate-800 px-2.5 py-1.5 text-xs font-mono-tabular text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-sky-400"
+                          />
+                          <div className="flex items-center bg-[#0B0F17] border border-slate-800 rounded-md px-2.5 py-1.5 gap-1.5 focus-within:border-sky-400">
                             <input
-                              type={revealed[fieldKey] ? 'text' : 'password'}
-                              value={slot.backups[idx]}
-                              onChange={(e) => handleProviderKeyChange(meta.id, idx, e.target.value)}
-                              placeholder={`Backup ${idx + 1}`}
-                              className="w-full min-w-0 bg-transparent text-xs font-mono-tabular text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                              type={revealed['cloudflare_primary'] ? 'text' : 'password'}
+                              value={slot.primary}
+                              onChange={(e) => handleProviderKeyChange('cloudflare', 'primary', e.target.value)}
+                              placeholder="Primary API Token"
+                              className="flex-1 min-w-0 bg-transparent text-xs font-mono-tabular text-slate-100 placeholder:text-slate-600 focus:outline-none"
                             />
                             <button
                               type="button"
-                              onClick={() => toggleReveal(fieldKey)}
+                              onClick={() => toggleReveal('cloudflare_primary')}
                               className="text-slate-500 hover:text-slate-200 shrink-0"
                             >
-                              {revealed[fieldKey] ? (
-                                <EyeOff className="w-3 h-3" />
+                              {revealed['cloudflare_primary'] ? (
+                                <EyeOff className="w-3.5 h-3.5" />
                               ) : (
-                                <Eye className="w-3 h-3" />
+                                <Eye className="w-3.5 h-3.5" />
                               )}
                             </button>
                           </div>
-                        );
-                      })}
+                        </div>
+                      </div>
+
+                      {/* Cloudflare 3 Backup Slots: Individual Account ID + API Token per backup */}
+                      <div className="space-y-2">
+                        <div className="text-xs text-slate-400">
+                          Backup Cloudflare Accounts (Separate Account ID + Workers AI API Token per slot)
+                        </div>
+                        {([0, 1, 2] as const).map((idx) => {
+                          const fieldKey = `cloudflare_b${idx}`;
+                          const slotTest = testResults[`cloudflare_${idx}`];
+                          const backupAccId = slot.backupAccountIds?.[idx] ?? '';
+                          return (
+                            <div
+                              key={idx}
+                              className="rounded-md border border-slate-800/80 bg-[#0B0F17]/40 p-2.5 space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-medium text-slate-300">
+                                  Backup {idx + 1}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={slotTest?.loading}
+                                  onClick={() => void handleTestProvider('cloudflare', idx)}
+                                  className="px-2 py-0.5 rounded border border-slate-800 bg-[#161F30] hover:border-sky-400 text-[11px] text-slate-300 flex items-center gap-1"
+                                >
+                                  {slotTest?.loading ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Zap className="w-3 h-3 text-sky-400" />
+                                  )}
+                                  Test
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <input
+                                  type="text"
+                                  value={backupAccId}
+                                  onChange={(e) => handleCloudflareBackupAccountChange(idx, e.target.value)}
+                                  placeholder={`Backup ${idx + 1} Account ID`}
+                                  className="w-full rounded-md bg-[#0B0F17] border border-slate-800 px-2.5 py-1.5 text-xs font-mono-tabular text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-sky-400"
+                                />
+                                <div className="flex items-center bg-[#0B0F17] border border-slate-800 rounded-md px-2.5 py-1.5 gap-1.5 focus-within:border-sky-400">
+                                  <input
+                                    type={revealed[fieldKey] ? 'text' : 'password'}
+                                    value={slot.backups[idx]}
+                                    onChange={(e) => handleProviderKeyChange('cloudflare', idx, e.target.value)}
+                                    placeholder={`Backup ${idx + 1} API Token`}
+                                    className="w-full min-w-0 bg-transparent text-xs font-mono-tabular text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleReveal(fieldKey)}
+                                    className="text-slate-500 hover:text-slate-200 shrink-0"
+                                  >
+                                    {revealed[fieldKey] ? (
+                                      <EyeOff className="w-3 h-3" />
+                                    ) : (
+                                      <Eye className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      {/* Primary Key */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-xs font-medium text-slate-300">Primary Key</label>
+                          <button
+                            type="button"
+                            disabled={testResults[`${meta.id}_primary`]?.loading}
+                            onClick={() => void handleTestProvider(meta.id, 'primary')}
+                            className="text-[11px] text-sky-400 hover:text-sky-300 flex items-center gap-1"
+                          >
+                            {testResults[`${meta.id}_primary`]?.loading ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Zap className="w-3 h-3" />
+                            )}
+                            Test Primary
+                          </button>
+                        </div>
+                        <div className="flex items-center bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-1.5 gap-2 focus-within:border-sky-400">
+                          <input
+                            type={revealed[`${meta.id}_primary`] ? 'text' : 'password'}
+                            value={slot.primary}
+                            onChange={(e) => handleProviderKeyChange(meta.id, 'primary', e.target.value)}
+                            placeholder={meta.placeholder}
+                            className="flex-1 bg-transparent text-xs font-mono-tabular text-slate-100 placeholder:text-slate-600 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => toggleReveal(`${meta.id}_primary`)}
+                            className="text-slate-500 hover:text-slate-200"
+                          >
+                            {revealed[`${meta.id}_primary`] ? (
+                              <EyeOff className="w-3.5 h-3.5" />
+                            ) : (
+                              <Eye className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 3 Backup Key Slots */}
+                      <div className="space-y-2 pt-1">
+                        <div className="text-xs text-slate-400">
+                          Backup Pooling Keys (Tried sequentially on 429 / error)
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          {([0, 1, 2] as const).map((idx) => {
+                            const fieldKey = `${meta.id}_b${idx}`;
+                            const bTest = testResults[`${meta.id}_${idx}`];
+                            return (
+                              <div key={idx} className="space-y-1">
+                                <div className="flex items-center bg-[#0B0F17] border border-slate-800/80 rounded-md px-2.5 py-1.5 gap-1.5 focus-within:border-sky-400">
+                                  <input
+                                    type={revealed[fieldKey] ? 'text' : 'password'}
+                                    value={slot.backups[idx]}
+                                    onChange={(e) => handleProviderKeyChange(meta.id, idx, e.target.value)}
+                                    placeholder={`Backup ${idx + 1}`}
+                                    className="w-full min-w-0 bg-transparent text-xs font-mono-tabular text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleReveal(fieldKey)}
+                                    className="text-slate-500 hover:text-slate-200 shrink-0"
+                                  >
+                                    {revealed[fieldKey] ? (
+                                      <EyeOff className="w-3 h-3" />
+                                    ) : (
+                                      <Eye className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                </div>
+                                {slot.backups[idx]?.trim() && (
+                                  <button
+                                    type="button"
+                                    disabled={bTest?.loading}
+                                    onClick={() => void handleTestProvider(meta.id, idx)}
+                                    className="text-[11px] text-slate-400 hover:text-sky-300 flex items-center gap-1"
+                                  >
+                                    {bTest?.loading ? (
+                                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                    ) : (
+                                      <Zap className="w-2.5 h-2.5 text-sky-400" />
+                                    )}
+                                    Test B{idx + 1}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -714,6 +932,7 @@ console.log(data.choices[0].message.content, data.hops);`;
               >
                 <option value="openrouter">OpenRouter</option>
                 <option value="groq">Groq</option>
+                <option value="grok">xAI Grok</option>
                 <option value="gemini">Google Gemini</option>
                 <option value="anthropic">Anthropic Claude</option>
                 <option value="cloudflare">Cloudflare Workers AI</option>

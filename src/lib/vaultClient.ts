@@ -4,16 +4,16 @@ const VAULT_STORAGE_KEY = 'mirofish_user_vault_v1';
 
 export const DEFAULT_CHAIN: ChainModelConfig[] = [
   { id: 'c_gemini_4', name: 'Gemini 4 Hydrogen', provider: 'gemini', model: 'gemini-4-hydrogen', enabled: true, timeoutMs: 35000, supportsVision: true },
+  { id: 'c_gemini_flash', name: 'Gemini 2.5 Flash', provider: 'gemini', model: 'gemini-2.5-flash', enabled: true, timeoutMs: 30000, supportsVision: true },
   { id: 'c_claude_haiku', name: 'Claude Haiku 5.5', provider: 'anthropic', model: 'claude-haiku-5-5', enabled: true, timeoutMs: 45000, supportsVision: true },
   { id: 'c_groq_llama70', name: 'Groq Llama 3.3 70B', provider: 'groq', model: 'llama-3.3-70b-versatile', enabled: true, timeoutMs: 25000, supportsVision: false },
+  { id: 'c_grok_latest', name: 'xAI Grok 4.7', provider: 'grok', model: 'grok-4.7', enabled: true, timeoutMs: 30000, supportsVision: false },
+  { id: 'c_or_free', name: 'OpenRouter Free Auto-Router', provider: 'openrouter', model: 'openrouter/free', enabled: true, timeoutMs: 30000, supportsVision: true },
   { id: 'c_or_llama70', name: 'OpenRouter Llama 3.3 70B (Free)', provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free', enabled: true, timeoutMs: 30000, supportsVision: false },
   { id: 'c_or_deepseek_v3', name: 'OpenRouter DeepSeek V3 (Free)', provider: 'openrouter', model: 'deepseek/deepseek-chat-v3-0324:free', enabled: true, timeoutMs: 30000, supportsVision: false },
-  { id: 'c_or_deepseek_r1', name: 'OpenRouter DeepSeek R1 (Free)', provider: 'openrouter', model: 'deepseek/deepseek-r1:free', enabled: true, timeoutMs: 35000, supportsVision: false },
   { id: 'c_or_gemma3', name: 'OpenRouter Gemma 3 27B Vision (Free)', provider: 'openrouter', model: 'google/gemma-3-27b-it:free', enabled: true, timeoutMs: 30000, supportsVision: true },
-  { id: 'c_or_mistral', name: 'OpenRouter Mistral Small 3.2 (Free)', provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct:free', enabled: true, timeoutMs: 30000, supportsVision: true },
   { id: 'c_cf_llama', name: 'Cloudflare Llama 3.3 70B', provider: 'cloudflare', model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', enabled: true, timeoutMs: 30000, supportsVision: false },
   { id: 'c_cf_qwq', name: 'Cloudflare QwQ 32B', provider: 'cloudflare', model: '@cf/qwen/qwq-32b', enabled: true, timeoutMs: 35000, supportsVision: false },
-  { id: 'c_gemini_lite', name: 'Gemini 3.1 Flash Lite', provider: 'gemini', model: 'gemini-3.1-flash-lite', enabled: true, timeoutMs: 25000, supportsVision: true },
 ];
 
 export function generateVaultToken(): string {
@@ -31,7 +31,7 @@ function emptySlot(includeAccountId = false): ProviderKeySlot {
   return {
     primary: '',
     backups: ['', '', ''],
-    ...(includeAccountId ? { accountId: '' } : {}),
+    ...(includeAccountId ? { accountId: '', backupAccountIds: ['', '', ''] } : {}),
   };
 }
 
@@ -42,6 +42,7 @@ export function createDefaultVault(): UserVault {
       gemini: emptySlot(),
       anthropic: emptySlot(),
       groq: emptySlot(),
+      grok: emptySlot(),
       openrouter: emptySlot(),
       cloudflare: emptySlot(true),
     },
@@ -60,13 +61,20 @@ export function loadVaultFromStorage(): UserVault {
       gemini: { ...fallback.providers.gemini, ...(parsed.providers?.gemini || {}) },
       anthropic: { ...fallback.providers.anthropic, ...(parsed.providers?.anthropic || {}) },
       groq: { ...fallback.providers.groq, ...(parsed.providers?.groq || {}) },
+      grok: { ...fallback.providers.grok, ...(parsed.providers?.grok || {}) },
       openrouter: { ...fallback.providers.openrouter, ...(parsed.providers?.openrouter || {}) },
       cloudflare: { ...fallback.providers.cloudflare, ...(parsed.providers?.cloudflare || {}) },
     };
-    (['gemini', 'anthropic', 'groq', 'openrouter', 'cloudflare'] as VaultProviderId[]).forEach((p) => {
+    (['gemini', 'anthropic', 'groq', 'grok', 'openrouter', 'cloudflare'] as VaultProviderId[]).forEach((p) => {
       const b = providers[p].backups;
       providers[p].backups = [b?.[0] || '', b?.[1] || '', b?.[2] || ''];
     });
+    const cfBackIds = providers.cloudflare.backupAccountIds;
+    providers.cloudflare.backupAccountIds = [
+      cfBackIds?.[0] || '',
+      cfBackIds?.[1] || '',
+      cfBackIds?.[2] || '',
+    ];
     return {
       apiToken: parsed.apiToken?.startsWith('ffr_') ? parsed.apiToken : fallback.apiToken,
       providers,
@@ -89,7 +97,15 @@ export function saveVaultToStorage(vault: UserVault): void {
 export function countProviderKeys(vault: UserVault, provider: VaultProviderId): number {
   const slot = vault.providers[provider];
   if (!slot) return 0;
-  if (provider === 'cloudflare' && !slot.accountId?.trim()) return 0;
+  if (provider === 'cloudflare') {
+    const primaryReady = Boolean(slot.primary?.trim() && slot.accountId?.trim());
+    let count = primaryReady ? 1 : 0;
+    (slot.backups || []).forEach((b, idx) => {
+      const acc = slot.backupAccountIds?.[idx]?.trim() || slot.accountId?.trim();
+      if (b?.trim() && acc) count++;
+    });
+    return count;
+  }
   let count = slot.primary?.trim() ? 1 : 0;
   for (const b of slot.backups || []) {
     if (b?.trim()) count++;

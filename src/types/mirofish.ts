@@ -1,9 +1,10 @@
-export type VaultProviderId = 'gemini' | 'groq' | 'openrouter' | 'cloudflare' | 'anthropic';
+export type VaultProviderId = 'gemini' | 'groq' | 'grok' | 'openrouter' | 'cloudflare' | 'anthropic';
 
 export interface ProviderKeySlot {
   primary: string;
   backups: [string, string, string];
-  accountId?: string; // Used by Cloudflare Workers AI
+  accountId?: string; // Primary Cloudflare Account ID
+  backupAccountIds?: [string, string, string]; // Per-backup Cloudflare Account IDs
 }
 
 export interface ChainModelConfig {
@@ -200,6 +201,7 @@ export interface ProxyProviderStatus {
   anthropicConfigured: boolean;
   anthropicModel: string;
   groqConfigured: boolean;
+  grokConfigured?: boolean;
   openrouterConfigured: boolean;
   cloudflareConfigured: boolean;
   cacheEntries: number;

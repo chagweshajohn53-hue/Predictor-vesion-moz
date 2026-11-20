@@ -99,6 +99,7 @@ async function requireFirebaseAuth(
 const ALLOWED_RELAY_HOSTS = new Set([
   'generativelanguage.googleapis.com',
   'api.groq.com',
+  'api.x.ai',
   'openrouter.ai',
   'api.cloudflare.com',
   'api.anthropic.com',
@@ -311,21 +312,21 @@ async function startServer(): Promise<void> {
       });
       return;
     }
-    const vault = getVaultByToken(token);
-    if (!vault) {
-      res.status(401).json({
-        error: { message: 'Vault token not recognized. Open Proxy Vault and sync your token.', type: 'authentication_error', code: 'invalid_api_key' },
-      });
-      return;
-    }
-
     const body = req.body as {
       model?: string;
       messages?: ChatMsg[];
       temperature?: number;
       max_tokens?: number;
       stream?: boolean;
+      vault?: UserVault;
     };
+    const vault = (body?.vault?.apiToken === token ? body.vault : null) ?? getVaultByToken(token);
+    if (!vault) {
+      res.status(401).json({
+        error: { message: 'Vault token not recognized. Open Proxy Vault and sync your token.', type: 'authentication_error', code: 'invalid_api_key' },
+      });
+      return;
+    }
     if (!Array.isArray(body?.messages) || body.messages.length === 0) {
       res.status(400).json({
         error: { message: 'Invalid chat request: non-empty messages array required.', type: 'invalid_request_error', code: 'invalid_request' },

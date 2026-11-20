@@ -59,8 +59,8 @@ service cloud.firestore {
 
     function isValidCloudflareSlot(slot) {
       return slot is map
-        && slot.keys().hasAll(['primary', 'backups', 'accountId'])
-        && slot.keys().hasOnly(['primary', 'backups', 'accountId'])
+        && slot.keys().hasAll(['primary', 'backups', 'accountId', 'backupAccountIds'])
+        && slot.keys().hasOnly(['primary', 'backups', 'accountId', 'backupAccountIds'])
         && slot.primary is string
         && slot.primary.size() <= 512
         && slot.accountId is string
@@ -69,7 +69,12 @@ service cloud.firestore {
         && slot.backups.size() == 3
         && slot.backups[0] is string && slot.backups[0].size() <= 512
         && slot.backups[1] is string && slot.backups[1].size() <= 512
-        && slot.backups[2] is string && slot.backups[2].size() <= 512;
+        && slot.backups[2] is string && slot.backups[2].size() <= 512
+        && slot.backupAccountIds is list
+        && slot.backupAccountIds.size() == 3
+        && slot.backupAccountIds[0] is string && slot.backupAccountIds[0].size() <= 128
+        && slot.backupAccountIds[1] is string && slot.backupAccountIds[1].size() <= 128
+        && slot.backupAccountIds[2] is string && slot.backupAccountIds[2].size() <= 128;
     }
 
     function isValidChainEntry(entry) {
@@ -78,7 +83,7 @@ service cloud.firestore {
         && entry.keys().hasOnly(['id', 'name', 'provider', 'model', 'enabled', 'timeoutMs', 'supportsVision'])
         && isValidId(entry.id)
         && entry.name is string && entry.name.size() >= 1 && entry.name.size() <= 120
-        && entry.provider in ['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic']
+        && entry.provider in ['gemini', 'groq', 'grok', 'openrouter', 'cloudflare', 'anthropic']
         && entry.model is string && entry.model.size() >= 1 && entry.model.size() <= 160
         && entry.enabled is bool
         && entry.timeoutMs is int && entry.timeoutMs >= 1000 && entry.timeoutMs <= 180000
@@ -96,10 +101,11 @@ service cloud.firestore {
         && data.apiToken.size() <= 128
         && data.apiToken.matches('^ffr_[a-zA-Z0-9_\\-]+$')
         && data.providers is map
-        && data.providers.keys().hasAll(['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'])
-        && data.providers.keys().hasOnly(['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'])
+        && data.providers.keys().hasAll(['gemini', 'groq', 'grok', 'openrouter', 'cloudflare', 'anthropic'])
+        && data.providers.keys().hasOnly(['gemini', 'groq', 'grok', 'openrouter', 'cloudflare', 'anthropic'])
         && isValidStandardSlot(data.providers.gemini)
         && isValidStandardSlot(data.providers.groq)
+        && isValidStandardSlot(data.providers.grok)
         && isValidStandardSlot(data.providers.openrouter)
         && isValidCloudflareSlot(data.providers.cloudflare)
         && isValidStandardSlot(data.providers.anthropic)

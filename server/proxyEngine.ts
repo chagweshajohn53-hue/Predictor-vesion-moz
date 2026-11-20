@@ -51,14 +51,21 @@ function setCached(key: string, value: unknown): void {
 
 export function getProxyStatus(vault?: UserVault | null): ProxyProviderStatus {
   const p = vault?.providers;
+  const cfHasPair = Boolean(
+    (p?.cloudflare?.accountId?.trim() && p?.cloudflare?.primary?.trim()) ||
+      p?.cloudflare?.backups?.some(
+        (b, idx) => Boolean(b?.trim() && (p?.cloudflare?.backupAccountIds?.[idx]?.trim() || p?.cloudflare?.accountId?.trim()))
+      )
+  );
   return {
     geminiConfigured: Boolean(p?.gemini?.primary || p?.gemini?.backups?.some(Boolean) || process.env.GEMINI_API_KEY),
     geminiModel: 'gemini-4-hydrogen',
     anthropicConfigured: Boolean(p?.anthropic?.primary || p?.anthropic?.backups?.some(Boolean)),
     anthropicModel: 'claude-haiku-5-5',
     groqConfigured: Boolean(p?.groq?.primary || p?.groq?.backups?.some(Boolean)),
+    grokConfigured: Boolean(p?.grok?.primary || p?.grok?.backups?.some(Boolean)),
     openrouterConfigured: Boolean(p?.openrouter?.primary || p?.openrouter?.backups?.some(Boolean)),
-    cloudflareConfigured: Boolean(p?.cloudflare?.accountId && (p?.cloudflare?.primary || p?.cloudflare?.backups?.some(Boolean))),
+    cloudflareConfigured: cfHasPair,
     cacheEntries: responseCache.size,
   };
 }

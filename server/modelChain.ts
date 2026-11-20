@@ -32,6 +32,15 @@ export const DEFAULT_CHAIN_CONFIG: ChainModelConfig[] = [
     supportsVision: true,
   },
   {
+    id: 'c_gemini_flash',
+    name: 'Gemini 2.5 Flash',
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+    enabled: true,
+    timeoutMs: 30000,
+    supportsVision: true,
+  },
+  {
     id: 'c_claude_haiku',
     name: 'Claude Haiku 5.5',
     provider: 'anthropic',
@@ -48,6 +57,24 @@ export const DEFAULT_CHAIN_CONFIG: ChainModelConfig[] = [
     enabled: true,
     timeoutMs: 25000,
     supportsVision: false,
+  },
+  {
+    id: 'c_grok_latest',
+    name: 'xAI Grok 4.7',
+    provider: 'grok',
+    model: 'grok-4.7',
+    enabled: true,
+    timeoutMs: 30000,
+    supportsVision: false,
+  },
+  {
+    id: 'c_or_free',
+    name: 'OpenRouter Free Auto-Router',
+    provider: 'openrouter',
+    model: 'openrouter/free',
+    enabled: true,
+    timeoutMs: 30000,
+    supportsVision: true,
   },
   {
     id: 'c_or_llama70',
@@ -68,28 +95,10 @@ export const DEFAULT_CHAIN_CONFIG: ChainModelConfig[] = [
     supportsVision: false,
   },
   {
-    id: 'c_or_deepseek_r1',
-    name: 'OpenRouter DeepSeek R1 (Free)',
-    provider: 'openrouter',
-    model: 'deepseek/deepseek-r1:free',
-    enabled: true,
-    timeoutMs: 35000,
-    supportsVision: false,
-  },
-  {
     id: 'c_or_gemma3',
     name: 'OpenRouter Gemma 3 27B Vision (Free)',
     provider: 'openrouter',
     model: 'google/gemma-3-27b-it:free',
-    enabled: true,
-    timeoutMs: 30000,
-    supportsVision: true,
-  },
-  {
-    id: 'c_or_mistral',
-    name: 'OpenRouter Mistral Small 3.2 (Free)',
-    provider: 'openrouter',
-    model: 'mistralai/mistral-small-3.2-24b-instruct:free',
     enabled: true,
     timeoutMs: 30000,
     supportsVision: true,
@@ -111,15 +120,6 @@ export const DEFAULT_CHAIN_CONFIG: ChainModelConfig[] = [
     enabled: true,
     timeoutMs: 35000,
     supportsVision: false,
-  },
-  {
-    id: 'c_gemini_lite',
-    name: 'Gemini 3.1 Flash Lite',
-    provider: 'gemini',
-    model: 'gemini-3.1-flash-lite',
-    enabled: true,
-    timeoutMs: 25000,
-    supportsVision: true,
   },
 ];
 
@@ -152,12 +152,14 @@ function collectProviderKeys(
 ): Array<{ keySlot: string; apiKey: string; accountId?: string }> {
   const out: Array<{ keySlot: string; apiKey: string; accountId?: string }> = [];
   if (slot) {
+    const primaryAccId = slot.accountId?.trim();
     if (slot.primary?.trim()) {
-      out.push({ keySlot: 'Primary', apiKey: slot.primary.trim(), accountId: slot.accountId?.trim() });
+      out.push({ keySlot: 'Primary', apiKey: slot.primary.trim(), accountId: primaryAccId });
     }
     (slot.backups || []).forEach((b, i) => {
       if (b?.trim()) {
-        out.push({ keySlot: `Backup ${i + 1}`, apiKey: b.trim(), accountId: slot.accountId?.trim() });
+        const backupAccId = slot.backupAccountIds?.[i]?.trim() || primaryAccId;
+        out.push({ keySlot: `Backup ${i + 1}`, apiKey: b.trim(), accountId: backupAccId });
       }
     });
   }
@@ -367,7 +369,7 @@ async function callGeminiAdapter(params: {
 }
 
 async function callOpenAiCompatibleAdapter(params: {
-  provider: 'groq' | 'openrouter' | 'cloudflare';
+  provider: 'groq' | 'grok' | 'openrouter' | 'cloudflare';
   apiKey: string;
   accountId?: string;
   model: string;
@@ -380,10 +382,15 @@ async function callOpenAiCompatibleAdapter(params: {
   let url = '';
   if (params.provider === 'groq') {
     url = 'https://api.groq.com/openai/v1/chat/completions';
+  } else if (params.provider === 'grok') {
+    url = 'https://api.x.ai/v1/chat/completions';
   } else if (params.provider === 'openrouter') {
     url = 'https://openrouter.ai/api/v1/chat/completions';
   } else {
-    url = `https://api.cloudflare.com/client/v4/accounts/${params.accountId}/ai/v1/chat/completions`;
+    if (!params.accountId?.trim()) {
+      throw Object.assign(new Error('Cloudflare Account ID required'), { status: 400 });
+    }
+    url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(params.accountId.trim())}/ai/v1/chat/completions`;
   }
 
   const images = params.images || [];
@@ -406,12 +413,18 @@ async function callOpenAiCompatibleAdapter(params: {
         )
       : params.messages;
 
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${params.apiKey}`,
+  };
+  if (params.provider === 'openrouter') {
+    headers['HTTP-Referer'] = process.env.APP_URL || 'https://mirofish.app';
+    headers['X-Title'] = 'MiroFish';
+  }
+
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${params.apiKey}`,
-    },
+    headers,
     signal: AbortSignal.timeout(params.timeoutMs || 30000),
     body: JSON.stringify({
       model: params.model,
@@ -424,7 +437,7 @@ async function callOpenAiCompatibleAdapter(params: {
 
   if (!res.ok) {
     const body = await res.text();
-    throw Object.assign(new Error(`HTTP ${res.status}: ${body.slice(0, 160)}`), {
+    throw Object.assign(new Error(`HTTP ${res.status}: ${body.slice(0, 180)}`), {
       status: res.status,
       retryAfter:
         parseResetMs(res.headers.get('retry-after')) ??
@@ -434,9 +447,13 @@ async function callOpenAiCompatibleAdapter(params: {
 
   const data = (await res.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: string } }>;
+    result?: { response?: string };
   } | null;
 
-  const text = data?.choices?.[0]?.message?.content?.trim() ?? '';
+  const text =
+    data?.choices?.[0]?.message?.content?.trim() ??
+    data?.result?.response?.trim() ??
+    '';
   if (!text) {
     throw Object.assign(new Error('Empty or malformed OpenAI-compatible payload'), { status: 502 });
   }
@@ -587,50 +604,91 @@ export async function testProviderConnection(params: {
   const pingMsgs: ChatMsg[] = [{ role: 'user', content: 'Reply with OK' }];
   try {
     if (params.provider === 'gemini') {
-      await callGeminiAdapter({
-        apiKey: params.apiKey,
-        model: params.model || 'gemini-4-hydrogen',
-        messages: pingMsgs,
-        maxTokens: 16,
-      });
-      return { ok: true, latencyMs: Date.now() - t0, status: 200, message: 'Connected' };
+      const modelsToTry = params.model
+        ? [params.model]
+        : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-4-hydrogen'];
+      let lastErr: unknown;
+      for (const m of modelsToTry) {
+        try {
+          await callGeminiAdapter({
+            apiKey: params.apiKey,
+            model: m,
+            messages: pingMsgs,
+            maxTokens: 16,
+          });
+          return { ok: true, latencyMs: Date.now() - t0, status: 200, message: `Connected (${m})` };
+        } catch (e) {
+          lastErr = e;
+          const msg = (e as Error)?.message || '';
+          if (!/404|not found|unsupported/i.test(msg)) throw e;
+        }
+      }
+      throw lastErr;
     }
+
     if (params.provider === 'anthropic') {
-      await callAnthropicAdapter({
-        apiKey: params.apiKey,
-        model: params.model || 'claude-haiku-5-5',
-        messages: pingMsgs,
-        timeoutMs: 15000,
-        maxTokens: 1,
-      });
-      return { ok: true, latencyMs: Date.now() - t0, status: 200, message: 'Connected' };
+      const modelsToTry = params.model
+        ? [params.model]
+        : ['claude-haiku-5-5', 'claude-3-5-haiku-latest'];
+      let lastErr: unknown;
+      for (const m of modelsToTry) {
+        try {
+          await callAnthropicAdapter({
+            apiKey: params.apiKey,
+            model: m,
+            messages: pingMsgs,
+            timeoutMs: 15000,
+            maxTokens: 4,
+          });
+          return { ok: true, latencyMs: Date.now() - t0, status: 200, message: `Connected (${m})` };
+        } catch (e) {
+          lastErr = e;
+          const status = (e as { status?: number })?.status;
+          if (status !== 404) throw e;
+        }
+      }
+      throw lastErr;
     }
-    if (params.provider === 'cloudflare' && !params.accountId) {
+
+    if (params.provider === 'cloudflare' && !params.accountId?.trim()) {
       return { ok: false, latencyMs: 0, status: 400, message: 'Cloudflare Account ID required' };
     }
-    const defaultModel =
-      params.provider === 'groq'
-        ? 'llama-3.3-70b-versatile'
-        : params.provider === 'openrouter'
-          ? 'meta-llama/llama-3.3-70b-instruct:free'
-          : '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-    await callOpenAiCompatibleAdapter({
-      provider: params.provider,
-      apiKey: params.apiKey,
-      accountId: params.accountId,
-      model: params.model || defaultModel,
-      messages: pingMsgs,
-      timeoutMs: 15000,
-      maxTokens: 1,
-    });
-    return { ok: true, latencyMs: Date.now() - t0, status: 200, message: 'Connected' };
+
+    const defaultModels: Record<'groq' | 'grok' | 'openrouter' | 'cloudflare', string[]> = {
+      groq: ['llama-3.3-70b-versatile'],
+      grok: ['grok-4.7', 'grok-4', 'grok-3-latest'],
+      openrouter: ['openrouter/free', 'meta-llama/llama-3.3-70b-instruct:free'],
+      cloudflare: ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct-fast'],
+    };
+
+    const modelsToTry = params.model ? [params.model] : defaultModels[params.provider];
+    let lastErr: unknown;
+    for (const m of modelsToTry) {
+      try {
+        await callOpenAiCompatibleAdapter({
+          provider: params.provider,
+          apiKey: params.apiKey,
+          accountId: params.accountId,
+          model: m,
+          messages: pingMsgs,
+          timeoutMs: 15000,
+          maxTokens: 16,
+        });
+        return { ok: true, latencyMs: Date.now() - t0, status: 200, message: `Connected (${m})` };
+      } catch (e) {
+        lastErr = e;
+        const status = (e as { status?: number })?.status;
+        if (status !== 404 && status !== 400) throw e;
+      }
+    }
+    throw lastErr;
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
     return {
       ok: false,
       latencyMs: Date.now() - t0,
       status: e.status || 400,
-      message: (e.message || 'Connection failed').slice(0, 120),
+      message: (e.message || 'Connection failed').slice(0, 140),
     };
   }
 }

@@ -1,3 +1,15 @@
+import {
+  buildEdgeEvidenceAndGraph,
+  chatEdgeWithSwarmTarget,
+  generateEdgeSwarmPersonas,
+  getEdgeProxyStatus,
+  runEdgeChainCompletion,
+  runEdgeSimulationRound,
+  synthesizeEdgePredictionReport,
+  testEdgeProviderConnection,
+} from './edgeEngine';
+import { auth } from './firebase';
+import { loadVaultFromStorage } from './vaultClient';
 import type {
   AgentPersona,
   ChatMessage,
@@ -13,7 +25,14 @@ import type {
   UserVault,
   VaultProviderId,
 } from '../types/mirofish';
-import { auth } from './firebase';
+
+class StaticProxyUnavailableError extends Error {
+  status: number;
+  constructor(url: string, status: number) {
+    super(`API route ${url} returned non-JSON response (${status}).`);
+    this.status = status;
+  }
+}
 
 async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
   const customHeaders = new Headers(options?.headers);
@@ -39,16 +58,14 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
   const rawText = await res.text();
 
   if (!contentType.includes('application/json')) {
-    throw new Error(
-      `API route ${url} returned non-JSON response (${res.status}). Ensure backend proxy routes are active.`
-    );
+    throw new StaticProxyUnavailableError(url, res.status);
   }
 
   let data: T & { error?: string | { message?: string } };
   try {
     data = JSON.parse(rawText) as T & { error?: string | { message?: string } };
   } catch {
-    throw new Error(`Invalid JSON received from ${url} (${res.status}).`);
+    throw new StaticProxyUnavailableError(url, res.status);
   }
 
   if (!res.ok) {
@@ -61,29 +78,52 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
   return data;
 }
 
-export function syncVaultToServer(vault: UserVault): Promise<{ ok: boolean; updatedAt: string }> {
-  return requestJson('/api/vault/sync', {
-    method: 'POST',
-    body: JSON.stringify(vault),
-  });
+function browserOrigin(): string {
+  return typeof window !== 'undefined' ? window.location.origin : 'https://mirofish.app';
 }
 
-export function testVaultProvider(params: {
+export async function syncVaultToServer(vault: UserVault): Promise<{ ok: boolean; updatedAt: string }> {
+  try {
+    return await requestJson('/api/vault/sync', {
+      method: 'POST',
+      body: JSON.stringify(vault),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return { ok: true, updatedAt: vault.updatedAt || new Date().toISOString() };
+    }
+    throw err;
+  }
+}
+
+export async function testVaultProvider(params: {
   provider: VaultProviderId;
   apiKey: string;
   accountId?: string;
   model?: string;
 }): Promise<{ ok: boolean; latencyMs: number; status: number; message: string }> {
-  return requestJson('/api/vault/test', {
-    method: 'POST',
-    body: JSON.stringify(params),
-  });
+  try {
+    return await requestJson('/api/vault/test', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return testEdgeProviderConnection({
+        ...params,
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+    }
+    throw err;
+  }
 }
 
-export function testUnifiedRelayCompletion(params: {
+export async function testUnifiedRelayCompletion(params: {
   token: string;
   model: string;
   prompt: string;
+  vault?: UserVault;
 }): Promise<{
   model: string;
   provider?: string;
@@ -91,49 +131,103 @@ export function testUnifiedRelayCompletion(params: {
   choices: Array<{ message: { content: string } }>;
   hops?: HopAudit[];
 }> {
-  return requestJson('/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.token}`,
-    },
-    body: JSON.stringify({
-      model: params.model,
-      messages: [{ role: 'user', content: params.prompt }],
-      max_tokens: 200,
-      stream: false,
-    }),
-  });
+  try {
+    return await requestJson('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.token}`,
+      },
+      body: JSON.stringify({
+        model: params.model,
+        messages: [{ role: 'user', content: params.prompt }],
+        max_tokens: 200,
+        stream: false,
+        ...(params.vault ? { vault: params.vault } : {}),
+      }),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      const vault = params.vault ?? loadVaultFromStorage();
+      const res = await runEdgeChainCompletion({
+        vault,
+        messages: [{ role: 'user', content: params.prompt }],
+        preferredModel: params.model || 'freeflow',
+        maxTokens: 200,
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+      return {
+        model: res.modelUsed,
+        provider: res.providerUsed,
+        keySlot: res.keySlotUsed,
+        choices: [{ message: { content: res.text } }],
+        hops: res.hops,
+      };
+    }
+    throw err;
+  }
 }
 
-export function fetchProxyStatus(): Promise<ProxyProviderStatus> {
-  return requestJson<ProxyProviderStatus>('/api/proxy/status');
+export async function fetchProxyStatus(): Promise<ProxyProviderStatus> {
+  try {
+    return await requestJson<ProxyProviderStatus>('/api/proxy/status');
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return getEdgeProxyStatus(loadVaultFromStorage());
+    }
+    throw err;
+  }
 }
 
-export function extractKnowledgeGraph(
+export async function extractKnowledgeGraph(
   directive: SimulationDirective,
   seeds: SeedMaterials,
   vault?: UserVault
 ): Promise<{ evidenceSummary: EvidenceSummary; graph: KnowledgeGraph; cached: boolean }> {
-  return requestJson('/api/proxy/graph', {
-    method: 'POST',
-    body: JSON.stringify({ directive, seeds, vault }),
-  });
+  try {
+    return await requestJson('/api/proxy/graph', {
+      method: 'POST',
+      body: JSON.stringify({ directive, seeds, vault }),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return buildEdgeEvidenceAndGraph(directive, seeds, vault ?? loadVaultFromStorage(), {
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+    }
+    throw err;
+  }
 }
 
-export function generatePersonas(
+export async function generatePersonas(
   directive: SimulationDirective,
   evidenceSummary: EvidenceSummary,
   graph: KnowledgeGraph,
   vault?: UserVault
 ): Promise<{ agents: AgentPersona[] }> {
-  return requestJson('/api/proxy/personas', {
-    method: 'POST',
-    body: JSON.stringify({ directive, evidenceSummary, graph, vault }),
-  });
+  try {
+    return await requestJson('/api/proxy/personas', {
+      method: 'POST',
+      body: JSON.stringify({ directive, evidenceSummary, graph, vault }),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      const agents = await generateEdgeSwarmPersonas(
+        directive,
+        evidenceSummary,
+        graph,
+        vault ?? loadVaultFromStorage(),
+        { isBrowser: true, refererOrigin: browserOrigin() }
+      );
+      return { agents };
+    }
+    throw err;
+  }
 }
 
-export function simulateRound(params: {
+export async function simulateRound(params: {
   directive: SimulationDirective;
   evidenceSummary: EvidenceSummary;
   graph: KnowledgeGraph;
@@ -143,13 +237,25 @@ export function simulateRound(params: {
   shockInjected?: string;
   vault?: UserVault;
 }): Promise<{ round: SimulationRound; updatedAgents: AgentPersona[] }> {
-  return requestJson('/api/proxy/simulate', {
-    method: 'POST',
-    body: JSON.stringify(params),
-  });
+  try {
+    return await requestJson('/api/proxy/simulate', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return runEdgeSimulationRound({
+        ...params,
+        vault: params.vault ?? loadVaultFromStorage(),
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+    }
+    throw err;
+  }
 }
 
-export function generateReport(params: {
+export async function generateReport(params: {
   directive: SimulationDirective;
   evidenceSummary: EvidenceSummary;
   graph: KnowledgeGraph;
@@ -158,13 +264,26 @@ export function generateReport(params: {
   seeds: SeedMaterials;
   vault?: UserVault;
 }): Promise<{ report: PredictionReport }> {
-  return requestJson('/api/proxy/report', {
-    method: 'POST',
-    body: JSON.stringify(params),
-  });
+  try {
+    return await requestJson('/api/proxy/report', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      const report = await synthesizeEdgePredictionReport({
+        ...params,
+        vault: params.vault ?? loadVaultFromStorage(),
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+      return { report };
+    }
+    throw err;
+  }
 }
 
-export function sendAgentChat(params: {
+export async function sendAgentChat(params: {
   directive: SimulationDirective;
   evidenceSummary: EvidenceSummary | null;
   report: PredictionReport | null;
@@ -174,29 +293,62 @@ export function sendAgentChat(params: {
   message: string;
   vault?: UserVault;
 }): Promise<{ reply: string; senderName: string }> {
-  return requestJson('/api/proxy/chat', {
-    method: 'POST',
-    body: JSON.stringify(params),
-  });
+  try {
+    return await requestJson('/api/proxy/chat', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return chatEdgeWithSwarmTarget({
+        ...params,
+        vault: params.vault ?? loadVaultFromStorage(),
+        isBrowser: true,
+        refererOrigin: browserOrigin(),
+      });
+    }
+    throw err;
+  }
 }
 
-export function listSavedSimulations(): Promise<{ simulations: SimulationWorkspace[] }> {
-  return requestJson('/api/simulations');
+export async function listSavedSimulations(): Promise<{ simulations: SimulationWorkspace[] }> {
+  try {
+    return await requestJson('/api/simulations');
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return { simulations: [] };
+    }
+    throw err;
+  }
 }
 
-export function saveSimulationWorkspace(
+export async function saveSimulationWorkspace(
   workspace: SimulationWorkspace
 ): Promise<{ simulation: SimulationWorkspace }> {
-  return requestJson('/api/simulations', {
-    method: 'POST',
-    body: JSON.stringify(workspace),
-  });
+  try {
+    return await requestJson('/api/simulations', {
+      method: 'POST',
+      body: JSON.stringify(workspace),
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return { simulation: workspace };
+    }
+    throw err;
+  }
 }
 
-export function deleteSavedSimulation(id: string): Promise<{ deleted: boolean }> {
-  return requestJson(`/api/simulations/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+export async function deleteSavedSimulation(id: string): Promise<{ deleted: boolean }> {
+  try {
+    return await requestJson(`/api/simulations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  } catch (err) {
+    if (err instanceof StaticProxyUnavailableError) {
+      return { deleted: true };
+    }
+    throw err;
+  }
 }
 
 export interface PromptPreset {
