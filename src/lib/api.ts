@@ -2,6 +2,7 @@ import type {
   AgentPersona,
   ChatMessage,
   EvidenceSummary,
+  HopAudit,
   KnowledgeGraph,
   PredictionReport,
   ProxyProviderStatus,
@@ -9,6 +10,8 @@ import type {
   SimulationDirective,
   SimulationRound,
   SimulationWorkspace,
+  UserVault,
+  VaultProviderId,
 } from '../types/mirofish';
 
 async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -16,11 +19,75 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  const contentType = res.headers.get('content-type') || '';
+  const rawText = await res.text();
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      `API route ${url} returned non-JSON response (${res.status}). Ensure backend proxy routes are active.`
+    );
+  }
+
+  let data: T & { error?: string | { message?: string } };
+  try {
+    data = JSON.parse(rawText) as T & { error?: string | { message?: string } };
+  } catch {
+    throw new Error(`Invalid JSON received from ${url} (${res.status}).`);
+  }
+
   if (!res.ok) {
-    throw new Error(data.error || `Request failed with status ${res.status}`);
+    const errMsg =
+      typeof data?.error === 'string'
+        ? data.error
+        : data?.error?.message || `Request failed with status ${res.status}`;
+    throw new Error(errMsg);
   }
   return data;
+}
+
+export function syncVaultToServer(vault: UserVault): Promise<{ ok: boolean; updatedAt: string }> {
+  return requestJson('/api/vault/sync', {
+    method: 'POST',
+    body: JSON.stringify(vault),
+  });
+}
+
+export function testVaultProvider(params: {
+  provider: VaultProviderId;
+  apiKey: string;
+  accountId?: string;
+  model?: string;
+}): Promise<{ ok: boolean; latencyMs: number; status: number; message: string }> {
+  return requestJson('/api/vault/test', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export function testUnifiedRelayCompletion(params: {
+  token: string;
+  model: string;
+  prompt: string;
+}): Promise<{
+  model: string;
+  provider?: string;
+  keySlot?: string;
+  choices: Array<{ message: { content: string } }>;
+  hops?: HopAudit[];
+}> {
+  return requestJson('/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${params.token}`,
+    },
+    body: JSON.stringify({
+      model: params.model,
+      messages: [{ role: 'user', content: params.prompt }],
+      max_tokens: 200,
+      stream: false,
+    }),
+  });
 }
 
 export function fetchProxyStatus(): Promise<ProxyProviderStatus> {
@@ -29,22 +96,24 @@ export function fetchProxyStatus(): Promise<ProxyProviderStatus> {
 
 export function extractKnowledgeGraph(
   directive: SimulationDirective,
-  seeds: SeedMaterials
+  seeds: SeedMaterials,
+  vault?: UserVault
 ): Promise<{ evidenceSummary: EvidenceSummary; graph: KnowledgeGraph; cached: boolean }> {
   return requestJson('/api/proxy/graph', {
     method: 'POST',
-    body: JSON.stringify({ directive, seeds }),
+    body: JSON.stringify({ directive, seeds, vault }),
   });
 }
 
 export function generatePersonas(
   directive: SimulationDirective,
   evidenceSummary: EvidenceSummary,
-  graph: KnowledgeGraph
+  graph: KnowledgeGraph,
+  vault?: UserVault
 ): Promise<{ agents: AgentPersona[] }> {
   return requestJson('/api/proxy/personas', {
     method: 'POST',
-    body: JSON.stringify({ directive, evidenceSummary, graph }),
+    body: JSON.stringify({ directive, evidenceSummary, graph, vault }),
   });
 }
 
@@ -56,6 +125,7 @@ export function simulateRound(params: {
   previousRounds: SimulationRound[];
   roundNumber: number;
   shockInjected?: string;
+  vault?: UserVault;
 }): Promise<{ round: SimulationRound; updatedAgents: AgentPersona[] }> {
   return requestJson('/api/proxy/simulate', {
     method: 'POST',
@@ -70,6 +140,7 @@ export function generateReport(params: {
   agents: AgentPersona[];
   rounds: SimulationRound[];
   seeds: SeedMaterials;
+  vault?: UserVault;
 }): Promise<{ report: PredictionReport }> {
   return requestJson('/api/proxy/report', {
     method: 'POST',
@@ -85,6 +156,7 @@ export function sendAgentChat(params: {
   targetAgent: AgentPersona | null;
   history: ChatMessage[];
   message: string;
+  vault?: UserVault;
 }): Promise<{ reply: string; senderName: string }> {
   return requestJson('/api/proxy/chat', {
     method: 'POST',

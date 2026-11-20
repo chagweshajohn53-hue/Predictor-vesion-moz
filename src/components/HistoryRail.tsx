@@ -1,10 +1,11 @@
-import { Trash2, ChevronRight } from 'lucide-react';
-import type { ProxyProviderStatus, SimulationStep, SimulationWorkspace } from '../types/mirofish';
+import { Trash2, ChevronRight, KeyRound } from 'lucide-react';
+import { countProviderKeys } from '../lib/vaultClient';
+import type { SimulationStep, SimulationWorkspace, UserVault } from '../types/mirofish';
 
 interface Props {
   activeWorkspace: SimulationWorkspace;
   savedWorkspaces: SimulationWorkspace[];
-  proxyStatus: ProxyProviderStatus | null;
+  vault: UserVault;
   onSelectStep: (step: SimulationStep) => void;
   onLoadWorkspace: (workspace: SimulationWorkspace) => void;
   onDeleteWorkspace: (id: string) => void;
@@ -21,13 +22,13 @@ const STEPS: Array<{ step: SimulationStep; label: string; caption: string }> = [
 export function HistoryRail({
   activeWorkspace,
   savedWorkspaces,
-  proxyStatus,
+  vault,
   onSelectStep,
   onLoadWorkspace,
   onDeleteWorkspace,
 }: Props) {
   const canVisitStep = (step: SimulationStep): boolean => {
-    if (step === 1) return true;
+    if (step === 1 || step === 6) return true;
     if (step === 2) return Boolean(activeWorkspace.graph);
     if (step === 3) return activeWorkspace.agents.length > 0;
     if (step === 4) return activeWorkspace.rounds.length > 0 || Boolean(activeWorkspace.report);
@@ -35,7 +36,14 @@ export function HistoryRail({
     return false;
   };
 
-  const activeSlots = (proxyStatus?.chain || []).filter((s) => s.configured);
+  const safeWorkspaces = Array.isArray(savedWorkspaces) ? savedWorkspaces : [];
+  const totalVaultKeys =
+    countProviderKeys(vault, 'gemini') +
+    countProviderKeys(vault, 'anthropic') +
+    countProviderKeys(vault, 'groq') +
+    countProviderKeys(vault, 'openrouter') +
+    countProviderKeys(vault, 'cloudflare');
+  const enabledModels = (vault.chain || []).filter((c) => c.enabled).length;
 
   return (
     <aside className="w-full lg:w-[272px] shrink-0 border-b lg:border-b-0 lg:border-r border-slate-800/80 bg-[#0E1420] flex flex-col">
@@ -71,47 +79,49 @@ export function HistoryRail({
         </nav>
       </div>
 
-      {/* Failover Model Chain (Prdictor-op Placement) */}
-      <div className="px-5 py-4 border-b border-slate-800/80 space-y-2">
+      {/* Client Vault Summary */}
+      <div className="px-5 py-4 border-b border-slate-800/80 space-y-2.5">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-slate-400">Failover Model Chain</span>
-          <span className="font-mono-tabular text-[11px] text-slate-500">
-            {activeSlots.length} ready
+          <span className="text-xs font-medium text-slate-400">Client Key Vault</span>
+          <span className="font-mono-tabular text-[11px] text-sky-400">
+            {totalVaultKeys} keys · {enabledModels} models
           </span>
         </div>
 
-        <div className="space-y-1.5 text-xs">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-slate-300 truncate">Claude Haiku 5.5</span>
-            <span className={proxyStatus?.anthropicConfigured ? 'text-emerald-400 shrink-0' : 'text-slate-500 shrink-0'}>
-              {proxyStatus?.anthropicConfigured ? 'Specialist' : 'Optional'}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-slate-300 truncate">Gemini 4 Hydrogen</span>
-            <span className={proxyStatus?.geminiConfigured ? 'text-emerald-400 shrink-0' : 'text-amber-400 shrink-0'}>
-              {proxyStatus?.geminiConfigured ? 'Primary' : 'Missing'}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-slate-300 truncate">Groq / OpenRouter / CF</span>
-            <span
-              className={
-                proxyStatus?.groqConfigured ||
-                proxyStatus?.openrouterConfigured ||
-                proxyStatus?.cloudflareConfigured
-                  ? 'text-emerald-400 shrink-0'
-                  : 'text-slate-500 shrink-0'
-              }
-            >
-              {proxyStatus?.groqConfigured ||
-              proxyStatus?.openrouterConfigured ||
-              proxyStatus?.cloudflareConfigured
-                ? 'Active Pool'
-                : 'Optional'}
-            </span>
-          </div>
+        <div className="space-y-1 text-xs">
+          {(
+            [
+              ['gemini', 'Gemini'],
+              ['anthropic', 'Claude'],
+              ['groq', 'Groq'],
+              ['openrouter', 'OpenRouter'],
+              ['cloudflare', 'Cloudflare'],
+            ] as const
+          ).map(([id, label]) => {
+            const count = countProviderKeys(vault, id);
+            return (
+              <div key={id} className="flex items-center justify-between gap-2">
+                <span className="text-slate-300">{label}</span>
+                <span className={`font-mono-tabular ${count > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  {count > 0 ? `${count} pooled` : 'Empty'}
+                </span>
+              </div>
+            );
+          })}
         </div>
+
+        <button
+          type="button"
+          onClick={() => onSelectStep(6)}
+          className={`w-full px-3 py-2 rounded-md border text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${
+            activeWorkspace.currentStep === 6
+              ? 'border-sky-500/50 bg-sky-500/15 text-sky-300'
+              : 'border-slate-800 bg-[#111827] hover:border-sky-400 text-slate-200'
+          }`}
+        >
+          <KeyRound className="w-3.5 h-3.5" />
+          Manage Keys &amp; Failover Chain
+        </button>
       </div>
 
       {/* Saved Simulations Archive */}
@@ -119,17 +129,17 @@ export function HistoryRail({
         <div className="flex items-center justify-between mb-3">
           <span className="text-xs font-medium text-slate-400">Saved Forecasts</span>
           <span className="font-mono-tabular text-xs text-slate-500">
-            {savedWorkspaces.length}
+            {safeWorkspaces.length}
           </span>
         </div>
 
-        {savedWorkspaces.length === 0 ? (
+        {safeWorkspaces.length === 0 ? (
           <p className="text-xs text-slate-500 leading-relaxed">
             Completed graph builds and forecasts are automatically saved here for revisiting.
           </p>
         ) : (
           <ul className="space-y-2">
-            {savedWorkspaces.map((item) => {
+            {safeWorkspaces.map((item) => {
               const isCurrent = item.id === activeWorkspace.id;
               return (
                 <li

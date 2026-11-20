@@ -1,35 +1,45 @@
-import { useState, type ChangeEvent } from 'react';
-import { ImagePlus, Link2, Plus, Trash2, ArrowRight, Loader2, ExternalLink } from 'lucide-react';
+import { useEffect, useState, type ChangeEvent } from 'react';
+import { ImagePlus, KeyRound, Link2, Plus, Trash2, ArrowRight, Loader2, ExternalLink } from 'lucide-react';
 import { UNIVERSAL_PRESETS } from '../lib/api';
+import { countProviderKeys } from '../lib/vaultClient';
 import { KnowledgeGraphCanvas } from './KnowledgeGraphCanvas';
 import type {
   ProxyProviderStatus,
   RoutingMode,
   SeedImage,
   SimulationWorkspace,
+  UserVault,
 } from '../types/mirofish';
 
 interface Props {
   workspace: SimulationWorkspace;
   proxyStatus: ProxyProviderStatus | null;
+  vault: UserVault;
   loading: boolean;
   error: string | null;
   onChangeWorkspace: (updater: (prev: SimulationWorkspace) => SimulationWorkspace) => void;
   onBuildGraph: () => void;
   onProceedToSwarm: () => void;
+  onOpenVault: () => void;
 }
 
 export function Step1SeedGraph({
   workspace,
   proxyStatus,
+  vault,
   loading,
   error,
   onChangeWorkspace,
   onBuildGraph,
   onProceedToSwarm,
+  onOpenVault,
 }: Props) {
   const [urlInput, setUrlInput] = useState('');
   const [textDraft, setTextDraft] = useState(workspace.seeds.textInputs[0] ?? '');
+
+  useEffect(() => {
+    setTextDraft(workspace.seeds.textInputs[0] ?? '');
+  }, [workspace.id]);
 
   const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -116,6 +126,9 @@ export function Step1SeedGraph({
     }));
   };
 
+  const hasAnthropic = countProviderKeys(vault, 'anthropic') > 0;
+  const hasGemini = countProviderKeys(vault, 'gemini') > 0 || Boolean(proxyStatus?.geminiConfigured);
+
   const routingOptions: Array<{ id: RoutingMode; label: string; enabled: boolean }> = [
     {
       id: 'freeflow-chain',
@@ -125,17 +138,12 @@ export function Step1SeedGraph({
     {
       id: 'hybrid-ensemble',
       label: 'Hybrid Ensemble',
-      enabled: Boolean(proxyStatus?.geminiConfigured),
+      enabled: hasGemini,
     },
     {
       id: 'anthropic-specialist',
       label: 'Claude Haiku 5.5',
-      enabled: Boolean(proxyStatus?.anthropicConfigured),
-    },
-    {
-      id: 'custom-proxy',
-      label: 'Upstream Proxy',
-      enabled: Boolean(proxyStatus?.customProxyConfigured),
+      enabled: hasAnthropic,
     },
   ];
 
@@ -238,7 +246,17 @@ export function Step1SeedGraph({
           {/* Proxy Routing & Grounding Controls */}
           <div className="pt-4 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <div className="text-xs font-medium text-slate-400 mb-2">Predictor Proxy Engine</div>
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <div className="text-xs font-medium text-slate-400">Predictor Proxy Engine</div>
+                <button
+                  type="button"
+                  onClick={onOpenVault}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Manage Vault</span>
+                </button>
+              </div>
               <div className="flex flex-wrap items-center gap-1 bg-[#0B0F17] p-1 rounded-md border border-slate-800/80">
                 {routingOptions.map((opt) => (
                   <button

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { HistoryRail } from './components/HistoryRail';
+import { ProxyVaultView } from './components/ProxyVaultView';
 import { Step1SeedGraph } from './components/Step1SeedGraph';
 import { Step2EnvSetup } from './components/Step2EnvSetup';
 import { Step3Simulation } from './components/Step3Simulation';
@@ -16,40 +17,142 @@ import {
   saveSimulationWorkspace,
   sendAgentChat,
   simulateRound,
+  syncVaultToServer,
 } from './lib/api';
+import { loadVaultFromStorage, saveVaultToStorage } from './lib/vaultClient';
 import type {
   ChatMessage,
   ProxyProviderStatus,
   SimulationStep,
   SimulationWorkspace,
+  UserVault,
 } from './types/mirofish';
+
+const LOCAL_ARCHIVE_KEY = 'mirofish_saved_workspaces_v1';
+
+function readLocalArchive(): SimulationWorkspace[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_ARCHIVE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SimulationWorkspace[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalArchive(list: SimulationWorkspace[]): void {
+  try {
+    localStorage.setItem(LOCAL_ARCHIVE_KEY, JSON.stringify(list.slice(0, 20)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function normalizeWorkspace(raw: SimulationWorkspace): SimulationWorkspace {
+  const fallback = createEmptyWorkspace();
+  return {
+    ...fallback,
+    ...raw,
+    directive: {
+      ...fallback.directive,
+      ...(raw.directive || {}),
+    },
+    seeds: {
+      textInputs: Array.isArray(raw.seeds?.textInputs) ? raw.seeds.textInputs : [],
+      urls: Array.isArray(raw.seeds?.urls) ? raw.seeds.urls : [],
+      images: Array.isArray(raw.seeds?.images) ? raw.seeds.images : [],
+    },
+    agents: Array.isArray(raw.agents) ? raw.agents : [],
+    rounds: Array.isArray(raw.rounds) ? raw.rounds : [],
+    chatThreads: raw.chatThreads && typeof raw.chatThreads === 'object' ? raw.chatThreads : {},
+  };
+}
 
 export default function App() {
   const [workspace, setWorkspace] = useState<SimulationWorkspace>(() => createEmptyWorkspace());
-  const [savedWorkspaces, setSavedWorkspaces] = useState<SimulationWorkspace[]>([]);
+  const [savedWorkspaces, setSavedWorkspaces] = useState<SimulationWorkspace[]>(() =>
+    readLocalArchive()
+  );
+  const [vault, setVault] = useState<UserVault>(() => loadVaultFromStorage());
+  const [vaultSyncStatus, setVaultSyncStatus] = useState<'idle' | 'saving' | 'synced' | 'error'>('idle');
   const [proxyStatus, setProxyStatus] = useState<ProxyProviderStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const syncVault = useCallback(async (targetVault: UserVault) => {
+    setVaultSyncStatus('saving');
+    try {
+      await syncVaultToServer(targetVault);
+      setVaultSyncStatus('synced');
+    } catch {
+      setVaultSyncStatus('error');
+    }
+  }, []);
 
   useEffect(() => {
+    syncVault(vault);
     fetchProxyStatus()
-      .then(setProxyStatus)
+      .then((status) => {
+        if (status && typeof status.geminiConfigured === 'boolean') {
+          setProxyStatus(status);
+        } else {
+          setProxyStatus(null);
+        }
+      })
       .catch(() => setProxyStatus(null));
 
     listSavedSimulations()
-      .then(({ simulations }) => setSavedWorkspaces(simulations))
-      .catch(() => setSavedWorkspaces([]));
-  }, []);
+      .then((res) => {
+        if (Array.isArray(res?.simulations)) {
+          const normalized = res.simulations.map(normalizeWorkspace);
+          setSavedWorkspaces(normalized);
+          writeLocalArchive(normalized);
+        }
+      })
+      .catch(() => {
+        setSavedWorkspaces(readLocalArchive());
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleUpdateVault = useCallback(
+    (updater: (prev: UserVault) => UserVault) => {
+      setVault((prev) => {
+        const next = { ...updater(prev), updatedAt: new Date().toISOString() };
+        saveVaultToStorage(next);
+        clearTimeout(syncTimerRef.current);
+        syncTimerRef.current = setTimeout(() => {
+          syncVault(next);
+        }, 450);
+        return next;
+      });
+    },
+    [syncVault]
+  );
 
   const persistWorkspace = useCallback(async (next: SimulationWorkspace) => {
+    const normalized = normalizeWorkspace(next);
+    setSavedWorkspaces((prev) => {
+      const safePrev = Array.isArray(prev) ? prev : [];
+      const updatedList = [normalized, ...safePrev.filter((item) => item.id !== normalized.id)];
+      writeLocalArchive(updatedList);
+      return updatedList;
+    });
+
     try {
-      const { simulation } = await saveSimulationWorkspace(next);
-      setSavedWorkspaces((prev) => {
-        const filtered = prev.filter((item) => item.id !== simulation.id);
-        return [simulation, ...filtered];
-      });
+      const res = await saveSimulationWorkspace(normalized);
+      if (res?.simulation?.id) {
+        const saved = normalizeWorkspace(res.simulation);
+        setSavedWorkspaces((prev) => {
+          const safePrev = Array.isArray(prev) ? prev : [];
+          const updatedList = [saved, ...safePrev.filter((item) => item.id !== saved.id)];
+          writeLocalArchive(updatedList);
+          return updatedList;
+        });
+      }
     } catch {
-      // Non-fatal persistence error; keep local state active
+      // Non-fatal server persistence error; local archive remains synced
     }
   }, []);
 
@@ -69,7 +172,8 @@ export default function App() {
     try {
       const { evidenceSummary, graph } = await extractKnowledgeGraph(
         workspace.directive,
-        workspace.seeds
+        workspace.seeds,
+        vault
       );
       const updated: SimulationWorkspace = {
         ...workspace,
@@ -98,7 +202,8 @@ export default function App() {
       const { agents } = await generatePersonas(
         workspace.directive,
         workspace.evidenceSummary,
-        workspace.graph
+        workspace.graph,
+        vault
       );
       const updated: SimulationWorkspace = {
         ...workspace,
@@ -122,7 +227,8 @@ export default function App() {
       const { agents } = await generatePersonas(
         workspace.directive,
         workspace.evidenceSummary,
-        workspace.graph
+        workspace.graph,
+        vault
       );
       const updated: SimulationWorkspace = {
         ...workspace,
@@ -153,6 +259,7 @@ export default function App() {
         previousRounds: workspace.rounds,
         roundNumber: nextRoundNum,
         shockInjected: shockText,
+        vault,
       });
       const updated: SimulationWorkspace = {
         ...workspace,
@@ -184,6 +291,7 @@ export default function App() {
           agents: current.agents,
           previousRounds: current.rounds,
           roundNumber: nextRoundNum,
+          vault,
         });
         current = {
           ...current,
@@ -213,6 +321,7 @@ export default function App() {
         agents: workspace.agents,
         rounds: workspace.rounds,
         seeds: workspace.seeds,
+        vault,
       });
       const updated: SimulationWorkspace = {
         ...workspace,
@@ -259,6 +368,7 @@ export default function App() {
         targetAgent,
         history: existingHistory,
         message,
+        vault,
       });
       const botMsg: ChatMessage = {
         id: `msg_${Date.now()}_a`,
@@ -284,14 +394,19 @@ export default function App() {
   };
 
   const handleDeleteSaved = async (id: string) => {
+    setSavedWorkspaces((prev) => {
+      const safePrev = Array.isArray(prev) ? prev : [];
+      const filtered = safePrev.filter((item) => item.id !== id);
+      writeLocalArchive(filtered);
+      return filtered;
+    });
+    if (workspace.id === id) {
+      setWorkspace(createEmptyWorkspace());
+    }
     try {
       await deleteSavedSimulation(id);
-      setSavedWorkspaces((prev) => prev.filter((item) => item.id !== id));
-      if (workspace.id === id) {
-        setWorkspace(createEmptyWorkspace());
-      }
     } catch {
-      // ignore delete errors
+      // ignore server delete errors when offline/static
     }
   };
 
@@ -348,17 +463,16 @@ export default function App() {
               workspace.currentStep === 4 ? 'text-sky-400' : ''
             }`}
           >
-            Forecast Report
+            Report
           </button>
           <button
             type="button"
-            disabled={!workspace.graph}
-            onClick={() => handleSelectStep(5)}
-            className={`hover:text-slate-100 disabled:text-slate-600 transition-colors whitespace-nowrap shrink-0 ${
-              workspace.currentStep === 5 ? 'text-sky-400' : ''
+            onClick={() => handleSelectStep(6)}
+            className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 ${
+              workspace.currentStep === 6 ? 'text-sky-400' : ''
             }`}
           >
-            Agent Chat
+            Proxy Vault
           </button>
         </nav>
 
@@ -378,11 +492,11 @@ export default function App() {
         <HistoryRail
           activeWorkspace={workspace}
           savedWorkspaces={savedWorkspaces}
-          proxyStatus={proxyStatus}
+          vault={vault}
           onSelectStep={handleSelectStep}
           onLoadWorkspace={(loaded) => {
             setError(null);
-            setWorkspace(loaded);
+            setWorkspace(normalizeWorkspace(loaded));
           }}
           onDeleteWorkspace={handleDeleteSaved}
         />
@@ -393,11 +507,13 @@ export default function App() {
               <Step1SeedGraph
                 workspace={workspace}
                 proxyStatus={proxyStatus}
+                vault={vault}
                 loading={loading}
                 error={error}
                 onChangeWorkspace={setWorkspace}
                 onBuildGraph={handleBuildGraph}
                 onProceedToSwarm={handleProceedToSwarm}
+                onOpenVault={() => handleSelectStep(6)}
               />
             )}
 
@@ -446,6 +562,15 @@ export default function App() {
                 sending={loading}
                 error={error}
                 onSendMessage={handleSendChat}
+              />
+            )}
+
+            {workspace.currentStep === 6 && (
+              <ProxyVaultView
+                vault={vault}
+                syncStatus={vaultSyncStatus}
+                onUpdateVault={handleUpdateVault}
+                onSyncNow={() => syncVault(vault)}
               />
             )}
           </div>

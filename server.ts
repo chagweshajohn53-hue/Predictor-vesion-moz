@@ -7,10 +7,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import {
-  DEFAULT_CLAUDE_MODEL,
-  isProviderConfigured,
-  MODEL_CHAIN,
+  expandVaultPool,
   runChainCompletion,
+  testProviderConnection,
   type ChatMsg,
 } from './server/modelChain.ts';
 import {
@@ -22,20 +21,66 @@ import {
   synthesizePredictionReport,
 } from './server/proxyEngine.ts';
 import { deleteSimulation, getSimulation, listSimulations, saveSimulation } from './server/store.ts';
+import { getVaultByToken, upsertVault } from './server/vaultStore.ts';
 import type {
   AgentPersona,
   ChatMessage,
   EvidenceSummary,
   KnowledgeGraph,
   PredictionReport,
+  SeedImage,
   SeedMaterials,
   SimulationDirective,
   SimulationRound,
   SimulationWorkspace,
+  UserVault,
+  VaultProviderId,
 } from './src/types/mirofish.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const ALLOWED_RELAY_HOSTS = new Set([
+  'generativelanguage.googleapis.com',
+  'api.groq.com',
+  'openrouter.ai',
+  'api.cloudflare.com',
+  'api.anthropic.com',
+]);
+
+function resolveVaultFromRequest(req: express.Request): UserVault | null {
+  const bodyVault = (req.body as { vault?: UserVault } | undefined)?.vault;
+  if (bodyVault?.apiToken) return bodyVault;
+  const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i);
+  if (authMatch?.[1]) {
+    return getVaultByToken(authMatch[1]);
+  }
+  return null;
+}
+
+function normalizeImageInput(raw: unknown): SeedImage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SeedImage[] = [];
+  raw.forEach((item, idx) => {
+    if (typeof item === 'string') {
+      const m = item.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+      if (m) {
+        out.push({ id: `img_${idx}`, name: `image_${idx}`, mimeType: m[1]!, base64Data: m[2]! });
+      }
+    } else if (item && typeof item === 'object') {
+      const obj = item as Partial<SeedImage>;
+      if (obj.mimeType && obj.base64Data) {
+        out.push({
+          id: obj.id || `img_${idx}`,
+          name: obj.name || `image_${idx}`,
+          mimeType: obj.mimeType,
+          base64Data: obj.base64Data,
+        });
+      }
+    }
+  });
+  return out;
+}
 
 async function startServer(): Promise<void> {
   const app = express();
@@ -43,68 +88,202 @@ async function startServer(): Promise<void> {
 
   app.use(express.json({ limit: '25mb' }));
 
-  // OpenAI-Compatible Proxy Endpoints (/v1/* and /api/public/v1/*) matching Prdictor-op / MIROFISH.md
-  function checkFreeflowAuth(req: express.Request): boolean {
-    const requiredToken = process.env.FREEFLOW_API_TOKEN;
-    if (!requiredToken) return true;
-    const match = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i);
-    return match?.[1] === requiredToken;
-  }
+  // CORS support for public proxy endpoints
+  app.use(['/v1', '/api/public'], (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'authorization, content-type, x-target-url, x-fwd-method, x-fwd-authorization'
+    );
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
-  const handleListModels = (req: express.Request, res: express.Response) => {
-    if (!checkFreeflowAuth(req)) {
-      res.status(401).json({
-        error: { message: 'Missing or invalid API token', type: 'authentication_error', code: 'invalid_api_key' },
+  // In-App Vault Sync & Live Ping Tester
+  app.post('/api/vault/sync', (req, res) => {
+    const vault = req.body as UserVault;
+    if (!vault?.apiToken || !vault.apiToken.startsWith('ffr_')) {
+      res.status(400).json({ error: 'Valid ffr_* vault token required.' });
+      return;
+    }
+    const saved = upsertVault(vault);
+    res.json({ ok: true, updatedAt: saved.updatedAt });
+  });
+
+  app.post('/api/vault/test', async (req, res) => {
+    const { provider, apiKey, accountId, model } = req.body as {
+      provider?: VaultProviderId;
+      apiKey?: string;
+      accountId?: string;
+      model?: string;
+    };
+    if (!provider || !apiKey?.trim()) {
+      res.status(400).json({ ok: false, latencyMs: 0, status: 400, message: 'Provider and API key required.' });
+      return;
+    }
+    const result = await testProviderConnection({
+      provider,
+      apiKey: apiKey.trim(),
+      accountId: accountId?.trim(),
+      model,
+    });
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  // Stateless Allowlisted Relay Endpoint (/api/public/relay)
+  app.post('/api/public/relay', async (req, res) => {
+    const headerTarget = req.headers['x-target-url'];
+    const targetUrl =
+      typeof headerTarget === 'string' && headerTarget
+        ? headerTarget
+        : (req.body as { targetUrl?: string })?.targetUrl;
+
+    if (!targetUrl) {
+      res.status(400).json({ error: 'Missing targetUrl or x-target-url header.' });
+      return;
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch {
+      res.status(400).json({ error: 'Invalid target URL.' });
+      return;
+    }
+
+    if (parsedUrl.protocol !== 'https:' || !ALLOWED_RELAY_HOSTS.has(parsedUrl.hostname)) {
+      res.status(403).json({
+        error: `Relay blocked: host "${parsedUrl.hostname}" is not in the AI provider allowlist.`,
       });
       return;
     }
-    const models = [{ id: 'freeflow', object: 'model', created: 0, owned_by: 'freeflow' }];
-    if (isProviderConfigured('anthropic')) {
-      models.push({ id: DEFAULT_CLAUDE_MODEL, object: 'model', created: 0, owned_by: 'anthropic' });
+
+    const fwdMethod =
+      (typeof req.headers['x-fwd-method'] === 'string' && req.headers['x-fwd-method']) ||
+      (req.body as { method?: string })?.method ||
+      'POST';
+    const fwdAuth =
+      typeof req.headers['x-fwd-authorization'] === 'string'
+        ? req.headers['x-fwd-authorization']
+        : undefined;
+    const fwdPayload =
+      typeof headerTarget === 'string'
+        ? req.body
+        : (req.body as { body?: unknown })?.body;
+
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (fwdAuth) headers['authorization'] = fwdAuth;
+
+    try {
+      const upstream = await fetch(parsedUrl.toString(), {
+        method: fwdMethod.toUpperCase(),
+        headers,
+        body:
+          fwdMethod.toUpperCase() === 'GET' || fwdPayload === undefined
+            ? undefined
+            : typeof fwdPayload === 'string'
+              ? fwdPayload
+              : JSON.stringify(fwdPayload),
+        signal: AbortSignal.timeout(45_000),
+      });
+      const text = await upstream.text();
+      const ct = upstream.headers.get('content-type') || 'application/json';
+      res.status(upstream.status).setHeader('Content-Type', ct).send(text);
+    } catch (err) {
+      res.status(502).json({ error: `Upstream relay failure: ${(err as Error).message}` });
     }
-    for (const entry of MODEL_CHAIN) {
-      if (isProviderConfigured(entry.provider)) {
-        models.push({ id: entry.model, object: 'model', created: 0, owned_by: entry.provider });
-      }
+  });
+
+  // Hosted OpenAI-Compatible Endpoints (/v1/* & /api/public/v1/*)
+  const handleListModels = (req: express.Request, res: express.Response) => {
+    const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i);
+    if (!authMatch?.[1]) {
+      res.status(401).json({
+        error: { message: 'Missing Authorization: Bearer ffr_* token.', type: 'authentication_error', code: 'invalid_api_key' },
+      });
+      return;
     }
-    res.json({ object: 'list', data: models });
+    const vault = getVaultByToken(authMatch[1]);
+    if (!vault) {
+      res.status(401).json({
+        error: { message: 'Vault token not found. Sync your in-app vault first.', type: 'authentication_error', code: 'invalid_api_key' },
+      });
+      return;
+    }
+    const pool = expandVaultPool(vault);
+    const uniqueModels = Array.from(
+      new Map(pool.map((p) => [p.entry.model, p.entry.provider])).entries()
+    );
+    res.json({
+      object: 'list',
+      data: [
+        { id: 'freeflow', object: 'model', created: 0, owned_by: 'freeflow' },
+        ...uniqueModels.map(([id, owner]) => ({
+          id,
+          object: 'model',
+          created: 0,
+          owned_by: owner,
+        })),
+      ],
+    });
   };
 
   const handleChatCompletions = async (req: express.Request, res: express.Response) => {
-    if (!checkFreeflowAuth(req)) {
+    const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i);
+    const token = authMatch?.[1];
+    if (!token) {
       res.status(401).json({
-        error: { message: 'Missing or invalid API token', type: 'authentication_error', code: 'invalid_api_key' },
+        error: { message: 'Missing Authorization: Bearer ffr_* token.', type: 'authentication_error', code: 'invalid_api_key' },
       });
       return;
     }
+    const vault = getVaultByToken(token);
+    if (!vault) {
+      res.status(401).json({
+        error: { message: 'Vault token not recognized. Open Proxy Vault and sync your token.', type: 'authentication_error', code: 'invalid_api_key' },
+      });
+      return;
+    }
+
     const body = req.body as {
       model?: string;
       messages?: ChatMsg[];
+      temperature?: number;
+      max_tokens?: number;
       stream?: boolean;
     };
     if (!Array.isArray(body?.messages) || body.messages.length === 0) {
       res.status(400).json({
-        error: { message: 'Invalid chat request: messages array required.', type: 'invalid_request_error', code: 'invalid_request' },
+        error: { message: 'Invalid chat request: non-empty messages array required.', type: 'invalid_request_error', code: 'invalid_request' },
       });
       return;
     }
     if (body.stream) {
       res.status(400).json({
-        error: { message: 'Streaming is not supported on /v1/chat/completions. Set stream: false.', type: 'invalid_request_error', code: 'unsupported_value' },
+        error: { message: 'Streaming is not supported on this endpoint. Set stream: false.', type: 'invalid_request_error', code: 'unsupported_value' },
       });
       return;
     }
 
     try {
       const result = await runChainCompletion({
+        vault,
         messages: body.messages,
         preferredModel: body.model || 'freeflow',
+        temperature: body.temperature,
+        maxTokens: body.max_tokens,
       });
       res.json({
         id: `chatcmpl-${crypto.randomUUID()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: result.modelUsed,
+        provider: result.providerUsed,
+        keySlot: result.keySlotUsed,
         choices: [
           {
             index: 0,
@@ -115,9 +294,64 @@ async function startServer(): Promise<void> {
         hops: result.hops,
       });
     } catch (err: unknown) {
-      const e = err as { statusCode?: number; message?: string };
+      const e = err as { statusCode?: number; message?: string; hops?: unknown };
       res.status(e.statusCode ?? 503).json({
-        error: { message: e.message || 'All configured providers are unavailable.', type: 'server_error', code: 'providers_unavailable' },
+        error: { message: e.message || 'All pooled providers failed.', type: 'server_error', code: 'providers_unavailable' },
+        hops: e.hops || [],
+      });
+    }
+  };
+
+  // Unified Multimodal Endpoint (/api/public/v1/generate)
+  const handleUnifiedGenerate = async (req: express.Request, res: express.Response) => {
+    const vault = resolveVaultFromRequest(req);
+    if (!vault) {
+      res.status(401).json({ error: 'Valid Bearer ffr_* token or synced vault required.' });
+      return;
+    }
+
+    const body = req.body as {
+      model?: string;
+      prompt?: string;
+      messages?: ChatMsg[];
+      images?: unknown[];
+      temperature?: number;
+      max_tokens?: number;
+    };
+
+    const messages: ChatMsg[] = Array.isArray(body?.messages) && body.messages.length > 0
+      ? body.messages
+      : body?.prompt?.trim()
+        ? [{ role: 'user', content: body.prompt.trim() }]
+        : [];
+
+    if (messages.length === 0) {
+      res.status(400).json({ error: 'Provide either prompt or messages.' });
+      return;
+    }
+
+    const images = normalizeImageInput(body?.images);
+    try {
+      const result = await runChainCompletion({
+        vault,
+        messages,
+        images,
+        preferredModel: body?.model || 'freeflow',
+        temperature: body?.temperature,
+        maxTokens: body?.max_tokens,
+      });
+      res.json({
+        text: result.text,
+        model: result.modelUsed,
+        provider: result.providerUsed,
+        keySlot: result.keySlotUsed,
+        hops: result.hops,
+      });
+    } catch (err: unknown) {
+      const e = err as { statusCode?: number; message?: string; hops?: unknown };
+      res.status(e.statusCode ?? 503).json({
+        error: e.message || 'Multimodal failover exhausted.',
+        hops: e.hops || [],
       });
     }
   };
@@ -126,18 +360,21 @@ async function startServer(): Promise<void> {
   app.get('/api/public/v1/models', handleListModels);
   app.post('/v1/chat/completions', handleChatCompletions);
   app.post('/api/public/v1/chat/completions', handleChatCompletions);
+  app.post('/api/public/v1/generate', handleUnifiedGenerate);
 
-  // Health & Proxy Provider Chain Capability Check (never leaks secrets)
-  app.get('/api/proxy/status', (_req, res) => {
-    res.json(getProxyStatus());
+  // Proxy Capability Status
+  app.get('/api/proxy/status', (req, res) => {
+    const vault = resolveVaultFromRequest(req);
+    res.json(getProxyStatus(vault));
   });
 
   // Step 1: Multimodal Evidence Extraction & Knowledge Graph Build
   app.post('/api/proxy/graph', async (req, res) => {
     try {
-      const { directive, seeds } = req.body as {
+      const { directive, seeds, vault } = req.body as {
         directive?: SimulationDirective;
         seeds?: SeedMaterials;
+        vault?: UserVault;
       };
       if (!directive?.prompt?.trim()) {
         res.status(400).json({ error: 'A prediction prompt is required.' });
@@ -148,40 +385,39 @@ async function startServer(): Promise<void> {
         urls: Array.isArray(seeds?.urls) ? seeds.urls.filter(Boolean) : [],
         images: Array.isArray(seeds?.images) ? seeds.images : [],
       };
-      const result = await buildEvidenceAndGraph(directive, safeSeeds);
+      const result = await buildEvidenceAndGraph(directive, safeSeeds, vault ?? resolveVaultFromRequest(req));
       res.json(result);
     } catch (err: unknown) {
       const e = err as { statusCode?: number; status?: number; message?: string };
-      const status = e.statusCode ?? e.status ?? 500;
-      res.status(status).json({ error: e.message || 'Failed to extract knowledge graph.' });
+      res.status(e.statusCode ?? e.status ?? 500).json({ error: e.message || 'Failed to extract knowledge graph.' });
     }
   });
 
   // Step 2: Adversarial Swarm Persona Generation
   app.post('/api/proxy/personas', async (req, res) => {
     try {
-      const { directive, evidenceSummary, graph } = req.body as {
+      const { directive, evidenceSummary, graph, vault } = req.body as {
         directive?: SimulationDirective;
         evidenceSummary?: EvidenceSummary;
         graph?: KnowledgeGraph;
+        vault?: UserVault;
       };
       if (!directive?.prompt || !evidenceSummary || !graph) {
         res.status(400).json({ error: 'Directive, evidence summary, and graph are required.' });
         return;
       }
-      const agents = await generateSwarmPersonas(directive, evidenceSummary, graph);
+      const agents = await generateSwarmPersonas(directive, evidenceSummary, graph, vault ?? resolveVaultFromRequest(req));
       res.json({ agents });
     } catch (err: unknown) {
       const e = err as { statusCode?: number; status?: number; message?: string };
-      const status = e.statusCode ?? e.status ?? 500;
-      res.status(status).json({ error: e.message || 'Failed to generate swarm personas.' });
+      res.status(e.statusCode ?? e.status ?? 500).json({ error: e.message || 'Failed to generate swarm personas.' });
     }
   });
 
-  // Step 3: Run Single Swarm Simulation Round (with optional What-If Shock)
+  // Step 3: Run Single Swarm Simulation Round
   app.post('/api/proxy/simulate', async (req, res) => {
     try {
-      const { directive, evidenceSummary, graph, agents, previousRounds, roundNumber, shockInjected } =
+      const { directive, evidenceSummary, graph, agents, previousRounds, roundNumber, shockInjected, vault } =
         req.body as {
           directive?: SimulationDirective;
           evidenceSummary?: EvidenceSummary;
@@ -190,12 +426,14 @@ async function startServer(): Promise<void> {
           previousRounds?: SimulationRound[];
           roundNumber?: number;
           shockInjected?: string;
+          vault?: UserVault;
         };
       if (!directive?.prompt || !evidenceSummary || !graph || !Array.isArray(agents)) {
         res.status(400).json({ error: 'Missing required simulation context.' });
         return;
       }
       const result = await runSimulationRound({
+        vault: vault ?? resolveVaultFromRequest(req),
         directive,
         evidenceSummary,
         graph,
@@ -207,27 +445,28 @@ async function startServer(): Promise<void> {
       res.json(result);
     } catch (err: unknown) {
       const e = err as { statusCode?: number; status?: number; message?: string };
-      const status = e.statusCode ?? e.status ?? 500;
-      res.status(status).json({ error: e.message || 'Failed to execute simulation round.' });
+      res.status(e.statusCode ?? e.status ?? 500).json({ error: e.message || 'Failed to execute simulation round.' });
     }
   });
 
   // Step 4: Synthesize Calibrated Prediction Report
   app.post('/api/proxy/report', async (req, res) => {
     try {
-      const { directive, evidenceSummary, graph, agents, rounds, seeds } = req.body as {
+      const { directive, evidenceSummary, graph, agents, rounds, seeds, vault } = req.body as {
         directive?: SimulationDirective;
         evidenceSummary?: EvidenceSummary;
         graph?: KnowledgeGraph;
         agents?: AgentPersona[];
         rounds?: SimulationRound[];
         seeds?: SeedMaterials;
+        vault?: UserVault;
       };
       if (!directive?.prompt || !evidenceSummary || !graph || !Array.isArray(agents)) {
         res.status(400).json({ error: 'Missing simulation state to synthesize report.' });
         return;
       }
       const report = await synthesizePredictionReport({
+        vault: vault ?? resolveVaultFromRequest(req),
         directive,
         evidenceSummary,
         graph,
@@ -238,15 +477,14 @@ async function startServer(): Promise<void> {
       res.json({ report });
     } catch (err: unknown) {
       const e = err as { statusCode?: number; status?: number; message?: string };
-      const status = e.statusCode ?? e.status ?? 500;
-      res.status(status).json({ error: e.message || 'Failed to synthesize prediction report.' });
+      res.status(e.statusCode ?? e.status ?? 500).json({ error: e.message || 'Failed to synthesize prediction report.' });
     }
   });
 
-  // Step 5: Deep Interrogation Chat with ReportAgent or Individual Agent
+  // Step 5: Deep Interrogation Chat
   app.post('/api/proxy/chat', async (req, res) => {
     try {
-      const { directive, evidenceSummary, report, targetId, targetAgent, history, message } =
+      const { directive, evidenceSummary, report, targetId, targetAgent, history, message, vault } =
         req.body as {
           directive?: SimulationDirective;
           evidenceSummary?: EvidenceSummary | null;
@@ -255,12 +493,14 @@ async function startServer(): Promise<void> {
           targetAgent?: AgentPersona | null;
           history?: ChatMessage[];
           message?: string;
+          vault?: UserVault;
         };
       if (!directive?.prompt || !message?.trim()) {
         res.status(400).json({ error: 'Directive and chat message are required.' });
         return;
       }
       const result = await chatWithSwarmTarget({
+        vault: vault ?? resolveVaultFromRequest(req),
         directive,
         evidenceSummary: evidenceSummary ?? null,
         report: report ?? null,
@@ -272,8 +512,7 @@ async function startServer(): Promise<void> {
       res.json(result);
     } catch (err: unknown) {
       const e = err as { statusCode?: number; status?: number; message?: string };
-      const status = e.statusCode ?? e.status ?? 500;
-      res.status(status).json({ error: e.message || 'Failed to process agent chat.' });
+      res.status(e.statusCode ?? e.status ?? 500).json({ error: e.message || 'Failed to process agent chat.' });
     }
   });
 

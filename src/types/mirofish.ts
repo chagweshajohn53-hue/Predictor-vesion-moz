@@ -1,6 +1,41 @@
-export type RoutingMode = 'freeflow-chain' | 'anthropic-specialist' | 'hybrid-ensemble' | 'custom-proxy';
+export type VaultProviderId = 'gemini' | 'groq' | 'openrouter' | 'cloudflare' | 'anthropic';
 
-export type SimulationStep = 1 | 2 | 3 | 4 | 5;
+export interface ProviderKeySlot {
+  primary: string;
+  backups: [string, string, string];
+  accountId?: string; // Used by Cloudflare Workers AI
+}
+
+export interface ChainModelConfig {
+  id: string;
+  name: string;
+  provider: VaultProviderId;
+  model: string;
+  enabled: boolean;
+  timeoutMs: number;
+  supportsVision?: boolean;
+}
+
+export interface UserVault {
+  apiToken: string; // ffr_* bearer token
+  providers: Record<VaultProviderId, ProviderKeySlot>;
+  chain: ChainModelConfig[];
+  updatedAt: string;
+}
+
+export interface HopAudit {
+  provider: string;
+  model: string;
+  keySlot: string;
+  latencyMs: number;
+  status: number | string;
+  ok: boolean;
+  error?: string;
+}
+
+export type RoutingMode = 'freeflow-chain' | 'anthropic-specialist' | 'hybrid-ensemble';
+
+export type SimulationStep = 1 | 2 | 3 | 4 | 5 | 6; // 6 = Proxy & Vault Manager
 
 export interface SeedImage {
   id: string;
@@ -38,14 +73,6 @@ export interface ExtractedClaim {
   confidence: number;
 }
 
-export interface ModelHop {
-  model: string;
-  provider: string;
-  ok: boolean;
-  detail: string;
-  latencyMs: number;
-}
-
 export interface EvidenceSummary {
   brief: string;
   claims: ExtractedClaim[];
@@ -53,7 +80,7 @@ export interface EvidenceSummary {
   groundedSources: GroundedSource[];
   imageInsights: string[];
   imageExtractorModel?: string;
-  hops?: ModelHop[];
+  hops?: HopAudit[];
 }
 
 export interface GraphNode {
@@ -108,6 +135,7 @@ export interface SimulationRound {
   disagreementIndex: number; // standard deviation 0-50
   summary: string;
   modelUsed?: string;
+  hops?: HopAudit[];
   entries: RoundAgentEntry[];
 }
 
@@ -129,7 +157,7 @@ export interface PredictionReport {
   engineUsed: string;
   decisionSource: 'claude_final_review' | 'chain_consensus' | 'hybrid_ensemble';
   modelsUsed: string[];
-  hops: ModelHop[];
+  hops: HopAudit[];
   headlineVerdict: string;
   directAnswer: string;
   confidenceScore: number;
@@ -166,16 +194,6 @@ export interface SimulationWorkspace {
   chatThreads: Record<string, ChatMessage[]>;
 }
 
-export interface ProviderChainSlot {
-  id: string;
-  provider: string;
-  model: string;
-  role: string;
-  configured: boolean;
-  supportsVision: boolean;
-  coolingDownSeconds: number;
-}
-
 export interface ProxyProviderStatus {
   geminiConfigured: boolean;
   geminiModel: string;
@@ -184,7 +202,5 @@ export interface ProxyProviderStatus {
   groqConfigured: boolean;
   openrouterConfigured: boolean;
   cloudflareConfigured: boolean;
-  customProxyConfigured: boolean;
   cacheEntries: number;
-  chain: ProviderChainSlot[];
 }

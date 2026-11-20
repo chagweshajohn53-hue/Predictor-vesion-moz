@@ -264,7 +264,8 @@ export function Step4Report({
                     <tr>
                       <th className="py-1.5 pr-3 font-medium">Provider</th>
                       <th className="py-1.5 pr-3 font-medium">Model</th>
-                      <th className="py-1.5 pr-3 font-medium">Result</th>
+                      <th className="py-1.5 pr-3 font-medium">Key Slot</th>
+                      <th className="py-1.5 pr-3 font-medium">Status</th>
                       <th className="py-1.5 text-right font-medium">Latency</th>
                     </tr>
                   </thead>
@@ -273,8 +274,9 @@ export function Step4Report({
                       <tr key={idx} className="text-slate-300">
                         <td className="py-2 pr-3 capitalize">{hop.provider}</td>
                         <td className="py-2 pr-3 font-mono-tabular">{hop.model}</td>
+                        <td className="py-2 pr-3 text-slate-400">{hop.keySlot || 'Primary'}</td>
                         <td className={`py-2 pr-3 ${hop.ok ? 'text-emerald-400' : 'text-amber-400'}`}>
-                          {hop.detail}
+                          {hop.ok ? `${hop.status} OK` : `${hop.status} · ${hop.error || 'Failed'}`}
                         </td>
                         <td className="py-2 text-right font-mono-tabular text-slate-400">
                           {hop.latencyMs}ms
