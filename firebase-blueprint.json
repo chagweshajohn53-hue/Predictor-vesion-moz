@@ -1,0 +1,187 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Authenticated user account record serving as the parent document for private vaults and saved predictions.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown in the workspace.",
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Avatar URL from the auth provider.",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "photoURL", "createdAt", "updatedAt"]
+    },
+    "UserVault": {
+      "title": "User Key Vault",
+      "description": "Private user-owned multi-provider API key slots, personal ffr_* bearer token, and failover chain priority.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "apiToken": {
+          "type": "string",
+          "description": "Personal ffr_* relay bearer token.",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^ffr_[a-zA-Z0-9_\\-]+$"
+        },
+        "providers": {
+          "type": "object",
+          "description": "Map of provider keys (gemini, groq, openrouter, cloudflare, anthropic) with 1 primary + 3 backup slots."
+        },
+        "chain": {
+          "type": "array",
+          "description": "Ordered failover model chain entries (up to 30)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": ["ownerId", "apiToken", "providers", "chain", "createdAt", "updatedAt"]
+    },
+    "SimulationRecord": {
+      "title": "Simulation Forecast Record",
+      "description": "Saved swarm prediction workspace including directive, URL/text/image metadata seeds, knowledge graph, agents, debate rounds, forecast report, and interrogation threads.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Simulation workspace identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Forecast title.",
+          "maxLength": 200
+        },
+        "currentStep": {
+          "type": "integer",
+          "description": "Active pipeline step (1-6)."
+        },
+        "directive": {
+          "type": "object",
+          "description": "Prompt, forecast horizon, domain hint, grounding flag, routing mode, and round count."
+        },
+        "seeds": {
+          "type": "object",
+          "description": "Bounded seed inputs (textInputs, urls, and image metadata without raw multi-MB base64)."
+        },
+        "evidenceSummary": {
+          "type": "object",
+          "description": "Extracted evidence claims and grounded citations (or null)."
+        },
+        "graph": {
+          "type": "object",
+          "description": "Extracted knowledge graph nodes and edges (or null)."
+        },
+        "agents": {
+          "type": "array",
+          "description": "Swarm agent personas (up to 24)."
+        },
+        "rounds": {
+          "type": "array",
+          "description": "Executed simulation debate rounds (up to 20)."
+        },
+        "report": {
+          "type": "object",
+          "description": "Synthesized forecast report and hop telemetry (or null)."
+        },
+        "chatThreads": {
+          "type": "object",
+          "description": "Map of agent/report interrogation threads (up to 30 threads)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "title",
+        "currentStep",
+        "directive",
+        "seeds",
+        "evidenceSummary",
+        "graph",
+        "agents",
+        "rounds",
+        "report",
+        "chatThreads",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Authenticated user root document."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": {
+        "$ref": "#/entities/UserVault"
+      },
+      "description": "Owner-isolated private key vault document (docId: vault)."
+    },
+    "/users/{userId}/simulations/{simulationId}": {
+      "schema": {
+        "$ref": "#/entities/SimulationRecord"
+      },
+      "description": "Owner-isolated saved prediction workspaces and forecast reports."
+    }
+  }
+}

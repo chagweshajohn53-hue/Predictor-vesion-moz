@@ -6,6 +6,7 @@ interface Props {
   activeWorkspace: SimulationWorkspace;
   savedWorkspaces: SimulationWorkspace[];
   vault: UserVault;
+  cloudConnected?: boolean;
   onSelectStep: (step: SimulationStep) => void;
   onLoadWorkspace: (workspace: SimulationWorkspace) => void;
   onDeleteWorkspace: (id: string) => void;
@@ -23,6 +24,7 @@ export function HistoryRail({
   activeWorkspace,
   savedWorkspaces,
   vault,
+  cloudConnected = false,
   onSelectStep,
   onLoadWorkspace,
   onDeleteWorkspace,
@@ -129,6 +131,7 @@ export function HistoryRail({
         <div className="flex items-center justify-between mb-3">
           <span className="text-xs font-medium text-slate-400">Saved Forecasts</span>
           <span className="font-mono-tabular text-xs text-slate-500">
+            {cloudConnected ? 'Firebase · ' : ''}
             {safeWorkspaces.length}
           </span>
         </div>

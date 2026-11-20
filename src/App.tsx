@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { LogIn, LogOut } from 'lucide-react';
+import { useFirebase } from './components/FirebaseProvider';
 import { HistoryRail } from './components/HistoryRail';
 import { ProxyVaultView } from './components/ProxyVaultView';
 import { Step1SeedGraph } from './components/Step1SeedGraph';
@@ -19,6 +21,13 @@ import {
   simulateRound,
   syncVaultToServer,
 } from './lib/api';
+import {
+  deleteSimulationFromFirestore,
+  loadVaultFromFirestore,
+  saveSimulationToFirestore,
+  saveVaultToFirestore,
+  subscribeToUserSimulations,
+} from './lib/firebaseStore';
 import { loadVaultFromStorage, saveVaultToStorage } from './lib/vaultClient';
 import type {
   ChatMessage,
@@ -26,6 +35,7 @@ import type {
   SimulationStep,
   SimulationWorkspace,
   UserVault,
+  VaultProviderId,
 } from './types/mirofish';
 
 const LOCAL_ARCHIVE_KEY = 'mirofish_saved_workspaces_v1';
@@ -69,30 +79,76 @@ function normalizeWorkspace(raw: SimulationWorkspace): SimulationWorkspace {
   };
 }
 
+function mergeVaultWithLocal(local: UserVault, cloud: UserVault | null): { merged: UserVault; needsCloudUpload: boolean } {
+  if (!cloud) {
+    return { merged: local, needsCloudUpload: true };
+  }
+  const providerIds: VaultProviderId[] = ['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'];
+  let needsCloudUpload = false;
+  const mergedProviders = { ...cloud.providers };
+
+  for (const pid of providerIds) {
+    const cloudSlot = cloud.providers[pid];
+    const localSlot = local.providers[pid];
+    const cloudHasKeys = Boolean(cloudSlot?.primary?.trim() || cloudSlot?.backups?.some((b) => b.trim()));
+    const localHasKeys = Boolean(localSlot?.primary?.trim() || localSlot?.backups?.some((b) => b.trim()));
+    if (!cloudHasKeys && localHasKeys) {
+      mergedProviders[pid] = { ...localSlot };
+      needsCloudUpload = true;
+    }
+  }
+
+  return {
+    merged: {
+      ...cloud,
+      providers: mergedProviders,
+    },
+    needsCloudUpload,
+  };
+}
+
 export default function App() {
+  const { user, authReady, signingIn, authError, signIn, signOut } = useFirebase();
   const [workspace, setWorkspace] = useState<SimulationWorkspace>(() => createEmptyWorkspace());
   const [savedWorkspaces, setSavedWorkspaces] = useState<SimulationWorkspace[]>(() =>
     readLocalArchive()
   );
   const [vault, setVault] = useState<UserVault>(() => loadVaultFromStorage());
   const [vaultSyncStatus, setVaultSyncStatus] = useState<'idle' | 'saving' | 'synced' | 'error'>('idle');
+  const [cloudVaultStatus, setCloudVaultStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [proxyStatus, setProxyStatus] = useState<ProxyProviderStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const syncVault = useCallback(async (targetVault: UserVault) => {
-    setVaultSyncStatus('saving');
-    try {
-      await syncVaultToServer(targetVault);
-      setVaultSyncStatus('synced');
-    } catch {
-      setVaultSyncStatus('error');
-    }
-  }, []);
+  const syncVault = useCallback(
+    async (targetVault: UserVault) => {
+      setVaultSyncStatus('saving');
+      try {
+        await syncVaultToServer(targetVault);
+        setVaultSyncStatus('synced');
+      } catch {
+        setVaultSyncStatus('error');
+      }
+
+      if (user) {
+        setCloudVaultStatus('saving');
+        try {
+          await saveVaultToFirestore(user.uid, targetVault);
+          setCloudVaultStatus('saved');
+        } catch {
+          setCloudVaultStatus('error');
+        }
+      }
+    },
+    [user]
+  );
 
   useEffect(() => {
-    syncVault(vault);
+    syncVaultToServer(vault)
+      .then(() => setVaultSyncStatus('synced'))
+      .catch(() => setVaultSyncStatus('error'));
+
     fetchProxyStatus()
       .then((status) => {
         if (status && typeof status.geminiConfigured === 'boolean') {
@@ -105,16 +161,81 @@ export default function App() {
 
     listSavedSimulations()
       .then((res) => {
-        if (Array.isArray(res?.simulations)) {
+        if (Array.isArray(res?.simulations) && !user) {
           const normalized = res.simulations.map(normalizeWorkspace);
           setSavedWorkspaces(normalized);
           writeLocalArchive(normalized);
         }
       })
       .catch(() => {
-        setSavedWorkspaces(readLocalArchive());
+        if (!user) {
+          setSavedWorkspaces(readLocalArchive());
+        }
       });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync Vault and Simulations with Firebase Firestore when authenticated
+  useEffect(() => {
+    if (!authReady) return;
+    if (!user) {
+      setCloudVaultStatus('idle');
+      return;
+    }
+
+    let cancelled = false;
+    setCloudVaultStatus('saving');
+    loadVaultFromFirestore(user.uid)
+      .then(async (cloudVault) => {
+        if (cancelled) return;
+        const localCurrent = loadVaultFromStorage();
+        const { merged, needsCloudUpload } = mergeVaultWithLocal(localCurrent, cloudVault);
+        setVault(merged);
+        saveVaultToStorage(merged);
+        syncVaultToServer(merged)
+          .then(() => setVaultSyncStatus('synced'))
+          .catch(() => setVaultSyncStatus('error'));
+
+        if (needsCloudUpload) {
+          await saveVaultToFirestore(user.uid, merged);
+        }
+        if (!cancelled) {
+          setCloudVaultStatus('saved');
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCloudVaultStatus('error');
+          setError((err as Error).message);
+        }
+      });
+
+    const unsubscribe = subscribeToUserSimulations(user.uid, (cloudList) => {
+      const localMap = new Map(readLocalArchive().map((item) => [item.id, item]));
+      const mergedList = cloudList.map((item) => {
+        const localMatch = localMap.get(item.id);
+        if (localMatch && localMatch.seeds?.images?.some((img) => img.base64Data)) {
+          return normalizeWorkspace({
+            ...item,
+            seeds: {
+              ...item.seeds,
+              images: item.seeds.images.map((img) => {
+                const fullImg = localMatch.seeds.images.find((li) => li.id === img.id);
+                return fullImg?.base64Data ? { ...img, base64Data: fullImg.base64Data } : img;
+              }),
+            },
+          });
+        }
+        return normalizeWorkspace(item);
+      });
+      setSavedWorkspaces(mergedList);
+      writeLocalArchive(mergedList);
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [authReady, user]);
 
   const handleUpdateVault = useCallback(
     (updater: (prev: UserVault) => UserVault) => {
@@ -123,7 +244,7 @@ export default function App() {
         saveVaultToStorage(next);
         clearTimeout(syncTimerRef.current);
         syncTimerRef.current = setTimeout(() => {
-          syncVault(next);
+          void syncVault(next);
         }, 450);
         return next;
       });
@@ -131,30 +252,41 @@ export default function App() {
     [syncVault]
   );
 
-  const persistWorkspace = useCallback(async (next: SimulationWorkspace) => {
-    const normalized = normalizeWorkspace(next);
-    setSavedWorkspaces((prev) => {
-      const safePrev = Array.isArray(prev) ? prev : [];
-      const updatedList = [normalized, ...safePrev.filter((item) => item.id !== normalized.id)];
-      writeLocalArchive(updatedList);
-      return updatedList;
-    });
+  const persistWorkspace = useCallback(
+    async (next: SimulationWorkspace) => {
+      const normalized = normalizeWorkspace(next);
+      setSavedWorkspaces((prev) => {
+        const safePrev = Array.isArray(prev) ? prev : [];
+        const updatedList = [normalized, ...safePrev.filter((item) => item.id !== normalized.id)];
+        writeLocalArchive(updatedList);
+        return updatedList;
+      });
 
-    try {
-      const res = await saveSimulationWorkspace(normalized);
-      if (res?.simulation?.id) {
-        const saved = normalizeWorkspace(res.simulation);
-        setSavedWorkspaces((prev) => {
-          const safePrev = Array.isArray(prev) ? prev : [];
-          const updatedList = [saved, ...safePrev.filter((item) => item.id !== saved.id)];
-          writeLocalArchive(updatedList);
-          return updatedList;
-        });
+      if (user) {
+        try {
+          await saveSimulationToFirestore(user.uid, normalized);
+        } catch (err) {
+          setError((err as Error).message);
+        }
       }
-    } catch {
-      // Non-fatal server persistence error; local archive remains synced
-    }
-  }, []);
+
+      try {
+        const res = await saveSimulationWorkspace(normalized);
+        if (res?.simulation?.id && !user) {
+          const saved = normalizeWorkspace(res.simulation);
+          setSavedWorkspaces((prev) => {
+            const safePrev = Array.isArray(prev) ? prev : [];
+            const updatedList = [saved, ...safePrev.filter((item) => item.id !== saved.id)];
+            writeLocalArchive(updatedList);
+            return updatedList;
+          });
+        }
+      } catch {
+        // Non-fatal server persistence error; local/Firebase archives remain synced
+      }
+    },
+    [user]
+  );
 
   const handleNewPrediction = () => {
     setError(null);
@@ -403,6 +535,13 @@ export default function App() {
     if (workspace.id === id) {
       setWorkspace(createEmptyWorkspace());
     }
+    if (user) {
+      try {
+        await deleteSimulationFromFirestore(user.uid, id);
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }
     try {
       await deleteSavedSimulation(id);
     } catch {
@@ -476,7 +615,42 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="flex items-center shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
+          {user ? (
+            <div className="flex items-center gap-2.5">
+              <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 whitespace-nowrap shrink-0">
+                {user.photoURL ? (
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || 'User'}
+                    referrerPolicy="no-referrer"
+                    className="w-6 h-6 rounded-full border border-slate-700"
+                  />
+                ) : null}
+                <span className="max-w-[140px] truncate">{user.displayName || user.email}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                className="px-2.5 py-2 text-xs font-medium text-slate-300 border border-slate-800 bg-[#111827] hover:border-slate-600 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                title="Sign out"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled={signingIn}
+              onClick={() => void signIn()}
+              className="px-3 py-2 text-xs font-medium text-slate-200 border border-slate-700 bg-[#111827] hover:border-sky-400 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <LogIn className="w-3.5 h-3.5 text-sky-400" />
+              <span>{signingIn ? 'Signing in...' : 'Sign in'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleNewPrediction}
@@ -493,6 +667,7 @@ export default function App() {
           activeWorkspace={workspace}
           savedWorkspaces={savedWorkspaces}
           vault={vault}
+          cloudConnected={Boolean(user)}
           onSelectStep={handleSelectStep}
           onLoadWorkspace={(loaded) => {
             setError(null);
@@ -503,6 +678,11 @@ export default function App() {
 
         <main className="flex-1 overflow-y-auto p-6 lg:p-8">
           <div className="max-w-[1160px] mx-auto">
+            {authError && (
+              <div className="mb-4 rounded-md border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs text-rose-200">
+                {authError}
+              </div>
+            )}
             {workspace.currentStep === 1 && (
               <Step1SeedGraph
                 workspace={workspace}
@@ -569,6 +749,10 @@ export default function App() {
               <ProxyVaultView
                 vault={vault}
                 syncStatus={vaultSyncStatus}
+                cloudConnected={Boolean(user)}
+                cloudUserEmail={user?.email || user?.displayName || null}
+                cloudStatus={cloudVaultStatus}
+                onSignIn={() => void signIn()}
                 onUpdateVault={handleUpdateVault}
                 onSyncNow={() => syncVault(vault)}
               />

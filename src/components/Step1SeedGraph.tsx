@@ -332,12 +332,19 @@ export function Step1SeedGraph({
                     key={img.id}
                     className="relative group rounded border border-slate-800 bg-[#0B0F17] overflow-hidden"
                   >
-                    <img
-                      src={`data:${img.mimeType};base64,${img.base64Data}`}
-                      alt={img.name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-20 object-cover"
-                    />
+                    {img.base64Data ? (
+                      <img
+                        src={`data:${img.mimeType};base64,${img.base64Data}`}
+                        alt={img.name}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-20 object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-20 px-2 flex flex-col items-center justify-center text-center bg-[#0E1420]">
+                        <ImagePlus className="w-4 h-4 text-slate-500 mb-1" />
+                        <span className="text-[11px] text-slate-400 truncate w-full">{img.name}</span>
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() =>

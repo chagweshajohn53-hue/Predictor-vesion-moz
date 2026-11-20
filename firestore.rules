@@ -1,0 +1,275 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() <= 120
+        && data.photoURL is string
+        && data.photoURL.size() <= 1000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStandardSlot(slot) {
+      return slot is map
+        && slot.keys().hasAll(['primary', 'backups'])
+        && slot.keys().hasOnly(['primary', 'backups'])
+        && slot.primary is string
+        && slot.primary.size() <= 512
+        && slot.backups is list
+        && slot.backups.size() == 3
+        && slot.backups[0] is string && slot.backups[0].size() <= 512
+        && slot.backups[1] is string && slot.backups[1].size() <= 512
+        && slot.backups[2] is string && slot.backups[2].size() <= 512;
+    }
+
+    function isValidCloudflareSlot(slot) {
+      return slot is map
+        && slot.keys().hasAll(['primary', 'backups', 'accountId'])
+        && slot.keys().hasOnly(['primary', 'backups', 'accountId'])
+        && slot.primary is string
+        && slot.primary.size() <= 512
+        && slot.accountId is string
+        && slot.accountId.size() <= 128
+        && slot.backups is list
+        && slot.backups.size() == 3
+        && slot.backups[0] is string && slot.backups[0].size() <= 512
+        && slot.backups[1] is string && slot.backups[1].size() <= 512
+        && slot.backups[2] is string && slot.backups[2].size() <= 512;
+    }
+
+    function isValidChainEntry(entry) {
+      return entry is map
+        && entry.keys().hasAll(['id', 'name', 'provider', 'model', 'enabled', 'timeoutMs'])
+        && entry.keys().hasOnly(['id', 'name', 'provider', 'model', 'enabled', 'timeoutMs', 'supportsVision'])
+        && isValidId(entry.id)
+        && entry.name is string && entry.name.size() >= 1 && entry.name.size() <= 120
+        && entry.provider in ['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic']
+        && entry.model is string && entry.model.size() >= 1 && entry.model.size() <= 160
+        && entry.enabled is bool
+        && entry.timeoutMs is int && entry.timeoutMs >= 1000 && entry.timeoutMs <= 180000
+        && (!('supportsVision' in entry) || entry.supportsVision is bool);
+    }
+
+    function isValidVault(data, userId) {
+      return data.keys().hasAll(['ownerId', 'apiToken', 'providers', 'chain', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'apiToken', 'providers', 'chain', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.apiToken is string
+        && data.apiToken.size() >= 8
+        && data.apiToken.size() <= 128
+        && data.apiToken.matches('^ffr_[a-zA-Z0-9_\\-]+$')
+        && data.providers is map
+        && data.providers.keys().hasAll(['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'])
+        && data.providers.keys().hasOnly(['gemini', 'groq', 'openrouter', 'cloudflare', 'anthropic'])
+        && isValidStandardSlot(data.providers.gemini)
+        && isValidStandardSlot(data.providers.groq)
+        && isValidStandardSlot(data.providers.openrouter)
+        && isValidCloudflareSlot(data.providers.cloudflare)
+        && isValidStandardSlot(data.providers.anthropic)
+        && data.chain is list
+        && data.chain.size() <= 30
+        && (data.chain.size() == 0 || isValidChainEntry(data.chain[0]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirective(d) {
+      return d is map
+        && d.keys().hasAll(['prompt', 'horizon', 'domainHint', 'groundingEnabled', 'routingMode', 'roundsCount'])
+        && d.keys().hasOnly(['prompt', 'horizon', 'domainHint', 'groundingEnabled', 'routingMode', 'roundsCount'])
+        && d.prompt is string && d.prompt.size() <= 10000
+        && d.horizon is string && d.horizon.size() <= 200
+        && d.domainHint is string && d.domainHint.size() <= 200
+        && d.groundingEnabled is bool
+        && d.routingMode in ['freeflow-chain', 'anthropic-specialist', 'hybrid-ensemble']
+        && d.roundsCount is int && d.roundsCount >= 1 && d.roundsCount <= 12;
+    }
+
+    function isValidImageMeta(img) {
+      return img is map
+        && img.keys().hasAll(['id', 'name', 'mimeType'])
+        && img.keys().hasOnly(['id', 'name', 'mimeType', 'sizeBytes'])
+        && isValidId(img.id)
+        && img.name is string && img.name.size() <= 240
+        && img.mimeType is string && img.mimeType.size() <= 80
+        && (!('sizeBytes' in img) || (img.sizeBytes is int && img.sizeBytes >= 0));
+    }
+
+    function isValidSeeds(s) {
+      return s is map
+        && s.keys().hasAll(['textInputs', 'urls', 'images'])
+        && s.keys().hasOnly(['textInputs', 'urls', 'images'])
+        && s.textInputs is list && s.textInputs.size() <= 10
+        && (s.textInputs.size() == 0 || (s.textInputs[0] is string && s.textInputs[0].size() <= 50000))
+        && s.urls is list && s.urls.size() <= 20
+        && (s.urls.size() == 0 || (s.urls[0] is string && s.urls[0].size() <= 2000))
+        && s.images is list && s.images.size() <= 6
+        && (s.images.size() == 0 || isValidImageMeta(s.images[0]));
+    }
+
+    function isValidSimulation(data, userId, simulationId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'title', 'currentStep', 'directive', 'seeds',
+          'evidenceSummary', 'graph', 'agents', 'rounds', 'report', 'chatThreads',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'currentStep', 'directive', 'seeds',
+          'evidenceSummary', 'graph', 'agents', 'rounds', 'report', 'chatThreads',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id == simulationId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.title is string && data.title.size() <= 200
+        && data.currentStep is int && data.currentStep >= 1 && data.currentStep <= 6
+        && isValidDirective(data.directive)
+        && isValidSeeds(data.seeds)
+        && (data.evidenceSummary == null || (data.evidenceSummary is map && data.evidenceSummary.keys().size() <= 20))
+        && (data.graph == null || (data.graph is map && data.graph.keys().size() <= 10))
+        && data.agents is list && data.agents.size() <= 24
+        && (data.agents.size() == 0 || data.agents[0] is map)
+        && data.rounds is list && data.rounds.size() <= 20
+        && (data.rounds.size() == 0 || data.rounds[0] is map)
+        && (data.report == null || (data.report is map && data.report.keys().size() <= 30))
+        && data.chatThreads is map && data.chatThreads.keys().size() <= 30
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isEmailVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isEmailVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'vault'
+          && isOwner(userId)
+          && (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if false;
+        allow create: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'vault'
+          && isOwner(userId)
+          && isValidVault(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'vault'
+          && isOwner(userId)
+          && isValidVault(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && incoming().diff(existing()).affectedKeys().hasOnly(['apiToken', 'providers', 'chain', 'updatedAt']);
+        allow delete: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'vault'
+          && isOwner(userId)
+          && resource != null
+          && existing().ownerId == request.auth.uid;
+      }
+
+      match /simulations/{simulationId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(simulationId)
+          && isOwner(userId)
+          && (resource == null || existing().ownerId == request.auth.uid);
+        allow list: if isSignedIn()
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(simulationId)
+          && isOwner(userId)
+          && isValidSimulation(incoming(), userId, simulationId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(simulationId)
+          && isOwner(userId)
+          && isValidSimulation(incoming(), userId, simulationId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'currentStep', 'directive', 'seeds', 'evidenceSummary',
+            'graph', 'agents', 'rounds', 'report', 'chatThreads', 'updatedAt'
+          ]);
+        allow delete: if isEmailVerified()
+          && isValidId(userId)
+          && isValidId(simulationId)
+          && isOwner(userId)
+          && resource != null
+          && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}

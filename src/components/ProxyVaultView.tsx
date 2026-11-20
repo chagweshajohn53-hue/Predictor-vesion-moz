@@ -29,6 +29,10 @@ import type {
 interface Props {
   vault: UserVault;
   syncStatus: 'idle' | 'saving' | 'synced' | 'error';
+  cloudConnected: boolean;
+  cloudUserEmail?: string | null;
+  cloudStatus: 'idle' | 'saving' | 'saved' | 'error';
+  onSignIn: () => void;
   onUpdateVault: (updater: (prev: UserVault) => UserVault) => void;
   onSyncNow: () => Promise<void>;
 }
@@ -71,7 +75,16 @@ const PROVIDER_META: Array<{
   },
 ];
 
-export function ProxyVaultView({ vault, syncStatus, onUpdateVault, onSyncNow }: Props) {
+export function ProxyVaultView({
+  vault,
+  syncStatus,
+  cloudConnected,
+  cloudUserEmail,
+  cloudStatus,
+  onSignIn,
+  onUpdateVault,
+  onSyncNow,
+}: Props) {
   const [activeTab, setActiveTab] = useState<'vault' | 'chain' | 'export'>('vault');
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [testResults, setTestResults] = useState<
@@ -315,6 +328,61 @@ console.log(data.choices[0].message.content, data.hops);`;
       {/* TAB 1: KEY VAULT */}
       {activeTab === 'vault' && (
         <div className="space-y-6">
+          {/* Firebase Cloud Persistence Bar */}
+          <div className="bg-[#111827] border border-slate-800/80 rounded-lg p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-sm font-semibold text-slate-100">
+                Firebase Cloud Persistence
+              </div>
+              <p className="text-xs text-slate-400">
+                {cloudConnected
+                  ? `Signed in as ${cloudUserEmail || 'Google Account'}. Your API keys, failover chain, and saved forecasts sync automatically to Firestore.`
+                  : 'Sign in with Google to save your API keys, failover chain, and forecast archive securely to your Firebase account across devices.'}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 shrink-0">
+              {cloudConnected ? (
+                <>
+                  <span
+                    className={`text-xs font-mono-tabular ${
+                      cloudStatus === 'saved'
+                        ? 'text-emerald-400'
+                        : cloudStatus === 'saving'
+                          ? 'text-sky-400'
+                          : cloudStatus === 'error'
+                            ? 'text-rose-400'
+                            : 'text-slate-400'
+                    }`}
+                  >
+                    {cloudStatus === 'saved'
+                      ? 'Saved to Firebase'
+                      : cloudStatus === 'saving'
+                        ? 'Saving to Firebase...'
+                        : cloudStatus === 'error'
+                          ? 'Firebase sync error'
+                          : 'Cloud connected'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void onSyncNow()}
+                    className="px-3.5 py-2 rounded-md border border-slate-700 bg-[#161F30] hover:border-sky-400 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap"
+                  >
+                    Save to Firebase
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onSignIn}
+                  className="px-4 py-2 rounded-md bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-semibold transition-colors whitespace-nowrap"
+                >
+                  Sign in with Google to Save
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Bearer Token Card */}
           <div className="bg-[#111827] border border-slate-800/80 rounded-lg p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="space-y-1">
