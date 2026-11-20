@@ -1,0 +1,6 @@
+{
+  "name": "MiroFish",
+  "description": "Universal swarm intelligence prediction engine and accuracy-optimized multimodal predictor proxy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
